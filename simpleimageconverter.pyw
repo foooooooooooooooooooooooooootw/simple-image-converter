@@ -1,3 +1,5 @@
+#V1.1 28/10/24
+#Add support for many more formats
 import subprocess
 import sys
 
@@ -26,18 +28,43 @@ from pillow_heif import register_heif_opener
 # Register HEIF opener with Pillow to handle HEIC files
 register_heif_opener()
 
-# Supported formats and those with quality settings
-FORMAT_OPTIONS = {
+# Updated FORMAT_OPTIONS with popular formats on top
+POPULAR_FORMATS = {
     'PNG': {'ext': 'png', 'supports_quality': False},
     'JPEG': {'ext': 'jpeg', 'supports_quality': True},
     'BMP': {'ext': 'bmp', 'supports_quality': False},
-    'TIFF': {'ext': 'tiff', 'supports_quality': False}
+    'TIFF': {'ext': 'tiff', 'supports_quality': False},
+    'GIF': {'ext': 'gif', 'supports_quality': False},
+    'ICO': {'ext': 'ico', 'supports_quality': False},
+    'WEBP': {'ext': 'webp', 'supports_quality': True},
+    'HEIF': {'ext': 'heif', 'supports_quality': True} if 'pillow_heif' in sys.modules else None,
 }
+
+ADDITIONAL_FORMATS = {
+    'EPS': {'ext': 'eps', 'supports_quality': False},
+    'IM': {'ext': 'im', 'supports_quality': False},
+    'MSP': {'ext': 'msp', 'supports_quality': False},
+    'PCX': {'ext': 'pcx', 'supports_quality': False},
+    'PPM': {'ext': 'ppm', 'supports_quality': False},
+    'SGI': {'ext': 'sgi', 'supports_quality': False},
+    'SPIDER': {'ext': 'spi', 'supports_quality': False},
+    'TGA': {'ext': 'tga', 'supports_quality': False},
+    'XBM': {'ext': 'xbm', 'supports_quality': False},
+    'PALM': {'ext': 'palm', 'supports_quality': False},
+    'PDF': {'ext': 'pdf', 'supports_quality': False},  # Requires an additional PDF reader
+    'PSD': {'ext': 'psd', 'supports_quality': False},
+    'XPM': {'ext': 'xpm', 'supports_quality': False},
+    'DIB': {'ext': 'dib', 'supports_quality': False}
+}
+
+# Combine into a single FORMAT_OPTIONS for the dropdown
+FORMAT_OPTIONS = {**POPULAR_FORMATS, **ADDITIONAL_FORMATS}
+FORMAT_OPTIONS = {k: v for k, v in FORMAT_OPTIONS.items() if v is not None}
 
 class ImageConverterApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Batch Image Converter")
+        self.root.title("Simple Image Converter")
 
         # Set fixed size limits for the window to prevent unintended expansion
         self.root.minsize(600, 600)
