@@ -1,5 +1,6 @@
-#V1.1 28/10/24
-#Add support for many more formats
+#V1.2 29/10/24
+#Add support RAW, AVIF, JXL files
+#Made converting images threaded
 import subprocess
 import sys
 
@@ -11,7 +12,7 @@ def check_and_install(package):
         subprocess.check_call([sys.executable, '-m', 'pip', 'install', package])
 
 def install_dependencies():
-    packages = ['Pillow', 'tkinterdnd2', 'pillow-heif', 'tkinterdnd2']
+    packages = ['Pillow', 'tkinterdnd2', 'pillow-heif', 'tkinterdnd2', 'pillow_avif', 'rawpy']
     for package in packages:
         check_and_install(package)
 
@@ -22,8 +23,27 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from tkinterdnd2 import TkinterDnD, DND_FILES  # Drag-and-drop support
-from PIL import Image, ImageTk
+import xml.etree.ElementTree as ET
+from PIL import Image, ImageDraw, ImageTk
 from pillow_heif import register_heif_opener
+import rawpy
+
+try:
+    import pillow_avif 
+    AVIF_SUPPORTED = True
+except ImportError:
+    AVIF_SUPPORTED = False
+
+# Check for FFmpeg availability
+def check_ffmpeg():
+    """Check if FFmpeg is installed and available on the PATH."""
+    try:
+        subprocess.run(["ffmpeg", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
+FFMPEG_AVAILABLE = check_ffmpeg()
 
 # Register HEIF opener with Pillow to handle HEIC files
 register_heif_opener()
@@ -38,6 +58,8 @@ POPULAR_FORMATS = {
     'ICO': {'ext': 'ico', 'supports_quality': False},
     'WEBP': {'ext': 'webp', 'supports_quality': True},
     'HEIF': {'ext': 'heif', 'supports_quality': True} if 'pillow_heif' in sys.modules else None,
+    'AVIF': {'ext': 'avif', 'supports_quality': True} if AVIF_SUPPORTED else None,
+    'JXL': {'ext': 'jxl', 'supports_quality': True} if FFMPEG_AVAILABLE else None
 }
 
 ADDITIONAL_FORMATS = {
@@ -59,7 +81,34 @@ ADDITIONAL_FORMATS = {
 
 # Combine into a single FORMAT_OPTIONS for the dropdown
 FORMAT_OPTIONS = {**POPULAR_FORMATS, **ADDITIONAL_FORMATS}
+
+if FFMPEG_AVAILABLE:
+    FORMAT_OPTIONS['JXL'] = {'ext': 'jxl', 'supports_quality': True}
+
 FORMAT_OPTIONS = {k: v for k, v in FORMAT_OPTIONS.items() if v is not None}
+
+# Helper functions for JPEG XL conversion using FFmpeg
+def save_as_jxl(input_image_path, output_path, quality=100):
+    """Convert an image to JPEG XL format using FFmpeg."""
+    quality_flag = f"-q:v {quality}"  # FFmpeg quality flag
+    subprocess.run(["ffmpeg", "-i", input_image_path, quality_flag, output_path], check=True)
+
+def open_jxl_as_image(jxl_path):
+    """Open a JPEG XL image by converting it to a temporary PNG using FFmpeg."""
+    temp_png = jxl_path + ".temp.png"
+    try:
+        subprocess.run(["ffmpeg", "-i", jxl_path, temp_png], check=True)
+        image = Image.open(temp_png)
+    finally:
+        if os.path.exists(temp_png):
+            os.remove(temp_png)
+    return image
+
+def open_raw_as_image(raw_path):
+    print(f"Using rawpy to open {raw_path}")
+    with rawpy.imread(raw_path) as raw:
+        rgb_array = raw.postprocess()
+    return Image.fromarray(rgb_array)
 
 class ImageConverterApp:
     def __init__(self, root):
@@ -138,7 +187,7 @@ class ImageConverterApp:
         self.scrollbar.pack(side="right", fill="y")
 
         # Convert button
-        tk.Button(self.root, text="Convert Images", command=self.convert_images).grid(row=5, column=0, columnspan=2, pady=10)
+        tk.Button(self.root, text="Convert Images", command=self.convert_images_threaded).grid(row=5, column=0, columnspan=2, pady=10)
 
         # Track window resizing to dynamically adjust thumbnail size and canvas width
         self.root.bind("<Configure>", self.debounce_resize_event)
@@ -187,9 +236,18 @@ class ImageConverterApp:
     def handle_dropped_files(self, event):
         # Handle files dragged and dropped into the window
         dropped_files = self.root.tk.splitlist(event.data)
+        print(f"Dropped files: {dropped_files}")  # Debug statement
         self.selected_files.extend(dropped_files)
-        print(f"Dropped files: {dropped_files}")
+        
+        for file in dropped_files:
+            ext = os.path.splitext(file)[1].lower()
+            if ext.lower() in ['.nef', '.cr2', '.arw', '.dng']:
+                print(f"Handling supported RAW file: {file}")  # Debug statement
+            else:
+                print(f"Unsupported file format dropped: {file}")  # Debug statement
+
         self.update_thumbnail_preview_async()
+
 
     def select_files(self):
         # Open file dialog for image selection
@@ -257,7 +315,7 @@ class ImageConverterApp:
         if not self.selected_files:
             messagebox.showwarning("Warning", "Please select images to convert.")
             return
-        
+
         # Prepare output directory
         output_dir = self.output_directory.get()
         if not output_dir:
@@ -272,12 +330,23 @@ class ImageConverterApp:
         for file_path in self.selected_files:
             try:
                 print(f"Converting image: {file_path}")
-                image = Image.open(file_path)
                 base_name = os.path.splitext(os.path.basename(file_path))[0]
                 output_path = os.path.join(output_dir, f"{base_name}.{output_ext}")
-                save_options = {'quality': quality} if quality else {}
-                image.save(output_path, format_key, **save_options)
                 
+                # Handle input-only formats separately
+                RAW_EXTENSIONS = ['.nef', '.cr2', '.arw']
+                if any(file_path.lower().endswith(ext) for ext in RAW_EXTENSIONS):
+                    image = open_raw_as_image(file_path)  # Defined previously
+                else:
+                    image = Image.open(file_path)
+                
+                # Save to the selected output format
+                if format_key == 'JXL':
+                    save_as_jxl(file_path, output_path, quality=quality or 100)
+                else:
+                    save_options = {'quality': quality} if quality else {}
+                    image.save(output_path, format_key, **save_options)
+
             except Exception as e:
                 print(f"Failed to convert {file_path}: {e}")
                 messagebox.showerror("Error", f"Failed to convert {file_path}: {str(e)}")
@@ -285,6 +354,10 @@ class ImageConverterApp:
 
         print(f"Images successfully converted to {output_dir}")
         messagebox.showinfo("Success", f"Images converted successfully to {output_dir}")
+
+    def convert_images_threaded(self):
+        conversion_thread = threading.Thread(target=self.convert_images)
+        conversion_thread.start()
 
 if __name__ == "__main__":
     root = TkinterDnD.Tk()  # Use TkinterDnD for drag-and-drop
