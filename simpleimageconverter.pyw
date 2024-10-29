@@ -1,6 +1,6 @@
-#V1.2 29/10/24
-#Add support RAW, AVIF, JXL files
-#Made converting images threaded
+#V1.3 30/10/24
+#Now each image is converted in a separate thread concurrently. The more threads your CPU has, the more images you can convert at once.
+#removed an accidental import statement
 import subprocess
 import sys
 
@@ -23,10 +23,10 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from tkinterdnd2 import TkinterDnD, DND_FILES  # Drag-and-drop support
-import xml.etree.ElementTree as ET
-from PIL import Image, ImageDraw, ImageTk
+from PIL import Image, ImageTk
 from pillow_heif import register_heif_opener
 import rawpy
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
     import pillow_avif 
@@ -248,7 +248,6 @@ class ImageConverterApp:
 
         self.update_thumbnail_preview_async()
 
-
     def select_files(self):
         # Open file dialog for image selection
         filetypes = [("Image files", "*.png *.jpg *.jpeg *.bmp *.tiff *.heic"), ("All files", "*.*")]
@@ -311,48 +310,59 @@ class ImageConverterApp:
 
             print(f"Total thumbnails loaded: {len(self.thumbnails)}")
 
+    def convert_single_image(self, file_path, output_dir, output_ext, quality):
+        """Convert a single image."""
+        base_name = os.path.splitext(os.path.basename(file_path))[0]
+        output_path = os.path.join(output_dir, f"{base_name}.{output_ext}")
+        try:
+            RAW_EXTENSIONS = ['.nef', '.cr2', '.arw', '.dng']
+            if any(file_path.lower().endswith(ext) for ext in RAW_EXTENSIONS):
+                image = open_raw_as_image(file_path)  # Use rawpy for RAW files
+            else:
+                image = Image.open(file_path)
+
+            if output_ext == 'jxl':
+                save_as_jxl(file_path, output_path, quality=quality or 100)
+            else:
+                save_options = {'quality': quality} if quality else {}
+                image.save(output_path, FORMAT_OPTIONS[output_ext]['ext'], **save_options)
+            
+            print(f"Converted {file_path} to {output_path}")
+            return True
+        except Exception as e:
+            print(f"Failed to convert {file_path}: {e}")
+            return False
+
     def convert_images(self):
+        """Convert images concurrently using a thread pool."""
         if not self.selected_files:
             messagebox.showwarning("Warning", "Please select images to convert.")
             return
 
-        # Prepare output directory
-        output_dir = self.output_directory.get()
-        if not output_dir:
-            output_dir = os.path.join(os.path.dirname(self.selected_files[0]), "(directory-converted)")
+        output_dir = self.output_directory.get() or os.path.join(os.path.dirname(self.selected_files[0]), "(directory-converted)")
         os.makedirs(output_dir, exist_ok=True)
 
-        # Output format and settings
         format_key = self.output_format.get()
         output_ext = FORMAT_OPTIONS[format_key]['ext']
         quality = self.quality.get() if FORMAT_OPTIONS[format_key]['supports_quality'] else None
 
-        for file_path in self.selected_files:
-            try:
-                print(f"Converting image: {file_path}")
-                base_name = os.path.splitext(os.path.basename(file_path))[0]
-                output_path = os.path.join(output_dir, f"{base_name}.{output_ext}")
-                
-                # Handle input-only formats separately
-                RAW_EXTENSIONS = ['.nef', '.cr2', '.arw']
-                if any(file_path.lower().endswith(ext) for ext in RAW_EXTENSIONS):
-                    image = open_raw_as_image(file_path)  # Defined previously
-                else:
-                    image = Image.open(file_path)
-                
-                # Save to the selected output format
-                if format_key == 'JXL':
-                    save_as_jxl(file_path, output_path, quality=quality or 100)
-                else:
-                    save_options = {'quality': quality} if quality else {}
-                    image.save(output_path, format_key, **save_options)
+        max_workers = max(1, os.cpu_count() - 1)
 
-            except Exception as e:
-                print(f"Failed to convert {file_path}: {e}")
-                messagebox.showerror("Error", f"Failed to convert {file_path}: {str(e)}")
-                continue
+        # Use ThreadPoolExecutor for concurrent image processing
+        with ThreadPoolExecutor(max_workers) as executor:
+            futures = {executor.submit(self.convert_single_image, file_path, output_dir, output_ext, quality): file_path for file_path in self.selected_files}
+            
+            for future in as_completed(futures):
+                file_path = futures[future]
+                try:
+                    success = future.result()
+                    if success:
+                        print(f"Successfully converted: {file_path}")
+                    else:
+                        print(f"Failed to convert: {file_path}")
+                except Exception as e:
+                    print(f"Exception for {file_path}: {e}")
 
-        print(f"Images successfully converted to {output_dir}")
         messagebox.showinfo("Success", f"Images converted successfully to {output_dir}")
 
     def convert_images_threaded(self):
