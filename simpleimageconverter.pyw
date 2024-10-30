@@ -1,5 +1,5 @@
-#V1.4 30/10/24
-#Fix a bug that completely breaks conversions (woops)
+#V1.5 31/10/24
+#Add a checkmark next to images that have finished conversion
 
 import subprocess
 import sys
@@ -23,7 +23,7 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from tkinterdnd2 import TkinterDnD, DND_FILES  # Drag-and-drop support
-from PIL import Image, ImageTk
+from PIL import Image, ImageDraw, ImageTk, ImageFont
 from pillow_heif import register_heif_opener
 import rawpy
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -125,6 +125,7 @@ class ImageConverterApp:
         self.output_format = tk.StringVar(value='PNG')
         self.output_directory = tk.StringVar()
         self.quality = tk.IntVar(value=85)  # Default JPEG quality
+        self.thumbnail_labels = {}
         self.thumbnail_size = 150  # Default thumbnail size
         self.columns = 3  # Default number of columns for thumbnails
         self.loading_thread = None  # Track the thumbnail loading thread
@@ -281,7 +282,7 @@ class ImageConverterApp:
             self.loading_thread.start()
 
     def update_thumbnail_preview(self):
-        # Lock to prevent concurrent updates
+        """Load and display thumbnails for all selected files in a grid layout."""
         with self.lock:
             # Clear existing thumbnails only once
             for widget in self.scrollable_frame.winfo_children():
@@ -290,14 +291,14 @@ class ImageConverterApp:
             unique_files = list(dict.fromkeys(self.selected_files))  # Remove duplicate files
             self.thumbnails.clear()  # Clear old references to prevent garbage collection
 
-            # Add thumbnails in a grid layout
+            # Load and display thumbnails in a grid layout
             for index, file_path in enumerate(unique_files):
                 try:
                     print(f"Loading thumbnail for: {file_path}")
-                    image = Image.open(file_path)
-                    image.thumbnail((self.thumbnail_size, self.thumbnail_size))
-                    thumbnail = ImageTk.PhotoImage(image)
-                    self.thumbnails.append(thumbnail)  # Keep a reference to prevent garbage collection
+                    img = Image.open(file_path)
+                    img.thumbnail((self.thumbnail_size, self.thumbnail_size))
+                    thumbnail = ImageTk.PhotoImage(img)
+                    self.thumbnails.append(thumbnail)  # Prevent garbage collection
 
                     # Place thumbnails in a grid layout
                     row = index // self.columns
@@ -305,11 +306,52 @@ class ImageConverterApp:
                     label = tk.Label(self.scrollable_frame, image=thumbnail, bg="white")
                     label.grid(row=row, column=col, padx=5, pady=5)
 
+                    # Store both the label and original image for overlaying check mark later
+                    self.thumbnail_labels[file_path] = {"label": label, "image": img}
                 except Exception as e:
                     print(f"Failed to load image {file_path}: {e}")
                     continue
 
             print(f"Total thumbnails loaded: {len(self.thumbnails)}")
+
+    def overlay_check_mark(self, file_path):
+        """Overlay a transparent circle with a green outline and a white check mark inside it."""
+        thumbnail_info = self.thumbnail_labels.get(file_path)
+        if thumbnail_info:
+            img = thumbnail_info["image"]
+            draw = ImageDraw.Draw(img)
+
+            img_width, img_height = img.size
+
+            # Define properties
+            check_mark = "✔"
+            circle_radius = 10  # Radius for the surrounding circle
+            font_size = 30  # Size for the check mark
+
+            # Load a custom font if available (Arial in this example)
+            try:
+                font = ImageFont.truetype("DejaVuSans.ttf", font_size)
+            except IOError:
+                font = ImageFont.load_default()  # Fallback to default font if custom font is unavailable
+
+            # Position: bottom-right, accounting for circle radius
+            text_position = (img_width - circle_radius * 2-10, img_height - circle_radius * 2-12)
+            circle_position = (img_width - 30 , img_height - 30 ,
+                           img_width - 5,img_height - 5)
+
+            # Draw a transparent circle with a green outline
+            draw.ellipse(circle_position, fill=None, outline="green", width=3)
+
+            # Draw the check mark inside the circle
+            draw.text(text_position, check_mark, fill=None, font=font)
+
+            # Update the label's image with the modified thumbnail
+            updated_thumbnail = ImageTk.PhotoImage(img)
+            thumbnail_info["label"].configure(image=updated_thumbnail)
+            thumbnail_info["label"].image = updated_thumbnail  # Prevent garbage collection
+
+            print(f"Check mark applied to {file_path}")
+
 
     def convert_single_image(self, file_path, output_dir, output_ext, quality):
         """Convert a single image and save it to the output directory."""
@@ -337,6 +379,7 @@ class ImageConverterApp:
                 image.save(output_path, format=output_ext.upper(), **save_options)
             
             print(f"Converted {file_path} to {output_path}")
+            self.overlay_check_mark(file_path)
             return True
 
         except Exception as e:
