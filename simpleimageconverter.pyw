@@ -1,6 +1,6 @@
-#V1.5 31/10/24
-#Add a checkmark next to images that have finished conversion
-
+#V1.6 31/10/24
+#Made checkmark more visible
+#Fixed some import statements
 import subprocess
 import sys
 
@@ -12,7 +12,7 @@ def check_and_install(package):
         subprocess.check_call([sys.executable, '-m', 'pip', 'install', package])
 
 def install_dependencies():
-    packages = ['Pillow', 'tkinterdnd2', 'pillow-heif', 'tkinterdnd2', 'pillow_avif', 'rawpy']
+    packages = ['Pillow', 'pillow-heif', 'tkinterdnd2', 'pillow-avif-plugin', 'rawpy']
     for package in packages:
         check_and_install(package)
 
@@ -340,7 +340,7 @@ class ImageConverterApp:
                            img_width - 5,img_height - 5)
 
             # Draw a transparent circle with a green outline
-            draw.ellipse(circle_position, fill=None, outline="green", width=3)
+            draw.ellipse(circle_position, fill="green", outline="green", width=3)
 
             # Draw the check mark inside the circle
             draw.text(text_position, check_mark, fill=None, font=font)
