@@ -1,6 +1,6 @@
-#V1.6 02/11/24
-#Made checkmark more visible
-#Fixed some import statements
+#V1.7 04/11/24
+#Added ability to remove individual images by clicking the "x"
+
 import subprocess
 import sys
 
@@ -249,7 +249,6 @@ class ImageConverterApp:
 
         self.update_thumbnail_preview_async()
 
-
     def select_files(self):
         # Open file dialog for image selection
         filetypes = [("Image files", "*.png *.jpg *.jpeg *.bmp *.tiff *.heic"), ("All files", "*.*")]
@@ -282,103 +281,204 @@ class ImageConverterApp:
             self.loading_thread.start()
 
     def update_thumbnail_preview(self):
-        """Load and display thumbnails for all selected files in a grid layout."""
+        """Load and display thumbnails for all selected files with a persistent removable 'X' button."""
         with self.lock:
-            # Clear existing thumbnails only once
             for widget in self.scrollable_frame.winfo_children():
                 widget.destroy()
             
             unique_files = list(dict.fromkeys(self.selected_files))  # Remove duplicate files
-            self.thumbnails.clear()  # Clear old references to prevent garbage collection
+            self.thumbnails.clear()  # Prevent garbage collection issues
 
-            # Load and display thumbnails in a grid layout
             for index, file_path in enumerate(unique_files):
                 try:
-                    print(f"Loading thumbnail for: {file_path}")
                     img = Image.open(file_path)
-                    img.thumbnail((self.thumbnail_size, self.thumbnail_size))
-                    thumbnail = ImageTk.PhotoImage(img)
-                    self.thumbnails.append(thumbnail)  # Prevent garbage collection
+                    # Create the initial thumbnail with the "X" button only
+                    overlay_thumbnail = self.create_thumbnail_with_x(img)
 
-                    # Place thumbnails in a grid layout
-                    row = index // self.columns
-                    col = index % self.columns
-                    label = tk.Label(self.scrollable_frame, image=thumbnail, bg="white")
+                    self.thumbnails.append(overlay_thumbnail)
+
+                    row, col = divmod(index, self.columns)
+                    label = tk.Label(self.scrollable_frame, image=overlay_thumbnail, bg="white")
                     label.grid(row=row, column=col, padx=5, pady=5)
 
-                    # Store both the label and original image for overlaying check mark later
-                    self.thumbnail_labels[file_path] = {"label": label, "image": img}
+                    # Bind click event to check if "X" button was clicked
+                    label.bind("<Button-1>", lambda e, path=file_path: self.remove_selection(path) if self.clicked_x(e) else None)
+                    self.thumbnail_labels[file_path] = {"label": label, "image": overlay_thumbnail}
                 except Exception as e:
                     print(f"Failed to load image {file_path}: {e}")
                     continue
 
-            print(f"Total thumbnails loaded: {len(self.thumbnails)}")
+    def create_thumbnail_with_x(self, img):
+        """Create a thumbnail with an enlarged canvas and 'X' button overlay."""
+        canvas_size = (self.thumbnail_size + 20, self.thumbnail_size + 20)
+        offset = 10
+
+        canvas = Image.new("RGBA", canvas_size, (255, 255, 255, 0))
+        img.thumbnail((self.thumbnail_size, self.thumbnail_size))
+        canvas.paste(img, (offset, offset))
+
+        # Draw "X" on canvas
+        draw = ImageDraw.Draw(canvas)
+        self.draw_remove_icon(draw, canvas.width, canvas.height)
+
+        return ImageTk.PhotoImage(canvas)
+
+    def clicked_x(self, event):
+        """Detect if the click is on the 'X' button region of the thumbnail."""
+        # Coordinates and size of the "X" button
+        x_button_x, x_button_y, radius = 15, 15, 10  # Adjust to the position of the "X" button
+        x_button_bounds = (
+            x_button_x - radius, x_button_y - radius,
+            x_button_x + radius, x_button_y + radius
+        )
+        # Check if click falls within "X" button area
+        return x_button_bounds[0] <= event.x <= x_button_bounds[2] and x_button_bounds[1] <= event.y <= x_button_bounds[3]
 
     def overlay_check_mark(self, file_path):
-        """Overlay a transparent circle with a green outline and a white check mark inside it."""
+        """Add a checkmark to an existing thumbnail while preserving the 'X' button, adapting for different aspect ratios."""
         thumbnail_info = self.thumbnail_labels.get(file_path)
         if thumbnail_info:
-            img = thumbnail_info["image"]
-            draw = ImageDraw.Draw(img)
+            # Load and resize the image for the thumbnail
+            img = Image.open(file_path)
+            img.thumbnail((self.thumbnail_size, self.thumbnail_size))
 
-            img_width, img_height = img.size
+            # Set up the canvas and paste the thumbnail at an offset
+            canvas_size = (self.thumbnail_size + 20, self.thumbnail_size + 20)
+            offset = 10
+            canvas = Image.new("RGBA", canvas_size, (255, 255, 255, 0))
+            canvas.paste(img, (offset, offset))
 
-            # Define properties
-            check_mark = "✔"
-            circle_radius = 10  # Radius for the surrounding circle
-            font_size = 30  # Size for the check mark
+            # Draw the "X" button on the canvas
+            draw = ImageDraw.Draw(canvas)
+            self.draw_remove_icon(draw, canvas.width, canvas.height)
 
-            # Load a custom font if available (Arial in this example)
-            try:
-                font = ImageFont.truetype("DejaVuSans.ttf", font_size)
-            except IOError:
-                font = ImageFont.load_default()  # Fallback to default font if custom font is unavailable
+            # Calculate the checkmark position based on actual thumbnail size within the canvas
+            actual_width, actual_height = img.size
+            checkmark_offset_x = offset + actual_width - 15
+            checkmark_offset_y = offset + actual_height - 15
+            circle_radius = 10
 
-            # Position: bottom-right, accounting for circle radius
-            text_position = (img_width - circle_radius * 2-10, img_height - circle_radius * 2-12)
-            circle_position = (img_width - 30 , img_height - 30 ,
-                           img_width - 5,img_height - 5)
+            # Draw the green checkmark circle
+            draw.ellipse(
+                [
+                    (checkmark_offset_x - circle_radius, checkmark_offset_y - circle_radius),
+                    (checkmark_offset_x + circle_radius, checkmark_offset_y + circle_radius)
+                ],
+                fill="green"
+            )
 
-            # Draw a transparent circle with a green outline
-            draw.ellipse(circle_position, fill="green", outline="green", width=3)
-
-            # Draw the check mark inside the circle
-            draw.text(text_position, check_mark, fill=None, font=font)
+            # Draw the checkmark symbol inside the circle
+            checkmark_color = "white"
+            draw.line([(checkmark_offset_x - 4, checkmark_offset_y), 
+                    (checkmark_offset_x, checkmark_offset_y + 4), 
+                    (checkmark_offset_x + 6, checkmark_offset_y - 6)], fill=checkmark_color, width=2)
 
             # Update the label's image with the modified thumbnail
-            updated_thumbnail = ImageTk.PhotoImage(img)
+            updated_thumbnail = ImageTk.PhotoImage(canvas)
             thumbnail_info["label"].configure(image=updated_thumbnail)
-            thumbnail_info["label"].image = updated_thumbnail  # Prevent garbage collection
+            thumbnail_info["label"].image = updated_thumbnail  # Keep reference to prevent garbage collection
+            print(f"Checkmark and 'X' applied to {file_path}")
 
-            print(f"Check mark applied to {file_path}")
+    def draw_remove_icon(self, draw, img_width, img_height):
+        """Draw the 'X' button in the top-left corner."""
+        circle_radius = 10
+        circle_center = (15, 15)  # Position slightly within bounds for visibility
 
+        # Draw circle background for "X"
+        draw.ellipse(
+            [
+                (circle_center[0] - circle_radius, circle_center[1] - circle_radius),
+                (circle_center[0] + circle_radius, circle_center[1] + circle_radius)
+            ],
+            fill="red"
+        )
+
+        # Draw "X" within the circle
+        x_color = "white"
+        x_offset = 4  # Define "X" size within the circle
+        x_start = (circle_center[0] - x_offset, circle_center[1] - x_offset)
+        x_end = (circle_center[0] + x_offset, circle_center[1] + x_offset)
+        draw.line([x_start, x_end], fill=x_color, width=2)
+        draw.line([(x_start[0], x_end[1]), (x_end[0], x_start[1])], fill=x_color, width=2)
+
+
+    def handle_thumbnail_click(self, event, file_path, img):
+        """Handle click on the thumbnail to remove it if 'X' is clicked, or enlarge if elsewhere."""
+        # Coordinates of the "X" button bounding box
+        x_button_x, x_button_y, radius = 15, 15, 10  # Position and size of the "X" button
+        x_button_bounds = (
+            x_button_x - radius, x_button_y - radius,
+            x_button_x + radius, x_button_y + radius
+        )
+
+        # Check if click is within the bounds of the "X" button
+        if x_button_bounds[0] <= event.x <= x_button_bounds[2] and x_button_bounds[1] <= event.y <= x_button_bounds[3]:
+            self.remove_selection(file_path)  # Click on "X" button removes the thumbnail
+
+    def add_remove_icon(self, img, file_path):
+        """Create a larger canvas with a floating circular 'X' button positioned close to the image corner."""
+        # Define the expanded canvas size, slightly larger than the thumbnail
+        canvas_size = (self.thumbnail_size + 20, self.thumbnail_size + 20)
+        offset = 10  # Offset to center the image within the larger canvas
+
+        # Create a blank canvas with a transparent background
+        canvas = Image.new("RGBA", canvas_size, (255, 255, 255, 0))
+        canvas.paste(img, (offset, offset))  # Center the image on the canvas
+
+        # Draw the "X" button near the top-left corner of the image, within the expanded canvas
+        draw = ImageDraw.Draw(canvas)
+        circle_radius = 10
+        # Position circle to be partially off the top-left but fully within the expanded canvas
+        circle_center = (offset + 5, offset + 5)  # Position slightly inwards to avoid canvas edges
+
+        # Draw circle background
+        draw.ellipse(
+            [
+                (circle_center[0] - circle_radius, circle_center[1] - circle_radius),
+                (circle_center[0] + circle_radius, circle_center[1] + circle_radius)
+            ],
+            fill="red"
+        )
+
+        # Draw the "X" inside the circle
+        x_color = "white"
+        x_offset = 4  # Adjust for a smaller "X" to fit nicely inside the circle
+        x_start = (circle_center[0] - x_offset, circle_center[1] - x_offset)
+        x_end = (circle_center[0] + x_offset, circle_center[1] + x_offset)
+        draw.line([x_start, x_end], fill=x_color, width=2)
+        draw.line([(x_start[0], x_end[1]), (x_end[0], x_start[1])], fill=x_color, width=2)
+
+        # Return the updated image as a Tkinter-compatible image
+        return ImageTk.PhotoImage(canvas)
+
+    def remove_selection(self, file_path):
+        """Remove a file from the selected files list and update the display."""
+        if file_path in self.selected_files:
+            self.selected_files.remove(file_path)
+            self.update_thumbnail_preview_async()
 
     def convert_single_image(self, file_path, output_dir, output_ext, quality):
-        """Convert a single image and save it to the output directory."""
+        """Convert a single image and save it to the output directory, then add a checkmark if successful."""
         base_name = os.path.splitext(os.path.basename(file_path))[0]
         output_path = os.path.join(output_dir, f"{base_name}.{output_ext}")
 
         try:
-            # Determine if the file is a RAW format supported by rawpy
+            # Open image
             RAW_EXTENSIONS = ['.nef', '.cr2', '.arw']
             if any(file_path.lower().endswith(ext) for ext in RAW_EXTENSIONS):
-                print(f"Using rawpy to open {file_path}")
                 with rawpy.imread(file_path) as raw:
                     rgb_array = raw.postprocess()
                 image = Image.fromarray(rgb_array)
             else:
-                # Open non-RAW files with Pillow
-                print(f"Using Pillow to open {file_path}")
                 image = Image.open(file_path)
 
-            # Save the image in the specified output format
-            if output_ext.lower() == "jxl":
-                self.save_as_jxl(image, output_path, quality=quality or 100)
-            else:
-                save_options = {'quality': quality} if quality else {}
-                image.save(output_path, format=output_ext.upper(), **save_options)
+            # Save image in specified format
+            save_options = {'quality': quality} if quality else {}
+            image.save(output_path, format=output_ext.upper(), **save_options)
             
             print(f"Converted {file_path} to {output_path}")
+            
+            # Apply checkmark overlay to the thumbnail
             self.overlay_check_mark(file_path)
             return True
 
