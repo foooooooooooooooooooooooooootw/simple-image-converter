@@ -1,8 +1,9 @@
-#V2.0 UI Overhaul 31/5/2025
-#Added resize, compress and upscale tabs
+#V2.1 UI Overhaul 1/6/2025
+#Increased startup speed by threading dependency check
 
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 # Function to check and install missing dependencies
 def check_and_install(package):
@@ -12,9 +13,11 @@ def check_and_install(package):
         subprocess.check_call([sys.executable, '-m', 'pip', 'install', package])
 
 def install_dependencies():
-    packages = ['Pillow', 'pillow-heif', 'tkinterdnd2', 'rawpy', 'realesrgan', 'opencv-python']
-    for package in packages:
-        check_and_install(package)
+    packages = ['Pillow', 'pillow-heif', 'tkinterdnd2', 'rawpy']
+    
+    # Use ThreadPoolExecutor to install packages in parallel
+    with ThreadPoolExecutor() as executor:
+        executor.map(check_and_install, packages)
 
 install_dependencies()
 
