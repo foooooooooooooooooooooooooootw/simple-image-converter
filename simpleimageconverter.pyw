@@ -1,10 +1,5 @@
-#V1.8 19/5/25
-#Added tabs for different image manipulation purposes
-#Added errors for the messagebox if a file fails to convert
-#Added a resize tab to resize images
-#fixed .dng file conversion issue (it only converted the thumbnail not the actual image)
-#fixed .arw files not generating thumbnails but it can be optimized further
-#TODO: complete upscale tab
+#V2.0 UI Overhaul 31/5/2025
+#Added resize, compress and upscale tabs
 
 import subprocess
 import sys
@@ -17,1186 +12,844 @@ def check_and_install(package):
         subprocess.check_call([sys.executable, '-m', 'pip', 'install', package])
 
 def install_dependencies():
-    packages = ['Pillow', 'pillow-heif', 'tkinterdnd2', 'pillow-avif-plugin', 'rawpy','opencv-python', 'opencv-contrib-python','numpy']
+    packages = ['Pillow', 'pillow-heif', 'tkinterdnd2', 'rawpy', 'realesrgan', 'opencv-python']
     for package in packages:
         check_and_install(package)
 
 install_dependencies()
 
-import os
-import threading
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
-from tkinterdnd2 import TkinterDnD, DND_FILES  # Drag-and-drop support
-from PIL import Image, ImageDraw, ImageTk, ImageFont, ImageFilter, ImageStat
-from pillow_heif import register_heif_opener
+from tkinter import ttk, filedialog, messagebox
+from tkinterdnd2 import TkinterDnD, DND_FILES
+import os
+from PIL import Image, ImageTk
+from PIL.ExifTags import TAGS
+import threading
+import queue
+from pathlib import Path
 import rawpy
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import concurrent.futures
-import psutil
-import cv2
-import numpy as np
-import urllib.request
-try:
-    import pillow_avif 
-    AVIF_SUPPORTED = True
-except ImportError:
-    AVIF_SUPPORTED = False
+import pillow_heif
 
-# Check for FFmpeg availability
-def check_ffmpeg():
-    """Check if FFmpeg is installed and available on the PATH."""
-    try:
-        subprocess.run(["ffmpeg", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-        return True
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return False
+# Enable HEIF support
+pillow_heif.register_heif_opener()
 
-FFMPEG_AVAILABLE = check_ffmpeg()
-
-# Register HEIF opener with Pillow to handle HEIC files
-register_heif_opener()
-
-# Updated FORMAT_OPTIONS with popular formats on top
-POPULAR_FORMATS = {
-    'PNG': {'ext': 'png', 'supports_quality': False},
-    'JPEG': {'ext': 'jpeg', 'supports_quality': True},
-    'BMP': {'ext': 'bmp', 'supports_quality': False},
-    'TIFF': {'ext': 'tiff', 'supports_quality': False},
-    'GIF': {'ext': 'gif', 'supports_quality': False},
-    'ICO': {'ext': 'ico', 'supports_quality': False},
-    'WEBP': {'ext': 'webp', 'supports_quality': True},
-    'HEIF': {'ext': 'heif', 'supports_quality': True} if 'pillow_heif' in sys.modules else None,
-    'AVIF': {'ext': 'avif', 'supports_quality': True} if AVIF_SUPPORTED else None,
-    'JXL': {'ext': 'jxl', 'supports_quality': True} if FFMPEG_AVAILABLE else None
-}
-
-ADDITIONAL_FORMATS = {
-    'EPS': {'ext': 'eps', 'supports_quality': False},
-    'IM': {'ext': 'im', 'supports_quality': False},
-    'MSP': {'ext': 'msp', 'supports_quality': False},
-    'PCX': {'ext': 'pcx', 'supports_quality': False},
-    'PPM': {'ext': 'ppm', 'supports_quality': False},
-    'SGI': {'ext': 'sgi', 'supports_quality': False},
-    'SPIDER': {'ext': 'spi', 'supports_quality': False},
-    'TGA': {'ext': 'tga', 'supports_quality': False},
-    'XBM': {'ext': 'xbm', 'supports_quality': False},
-    'PALM': {'ext': 'palm', 'supports_quality': False},
-    'PDF': {'ext': 'pdf', 'supports_quality': False},  # Requires an additional PDF reader
-    'PSD': {'ext': 'psd', 'supports_quality': False},
-    'XPM': {'ext': 'xpm', 'supports_quality': False},
-    'DIB': {'ext': 'dib', 'supports_quality': False}
-}
-
-# Combine into a single FORMAT_OPTIONS for the dropdown
-FORMAT_OPTIONS = {**POPULAR_FORMATS, **ADDITIONAL_FORMATS}
-
-if FFMPEG_AVAILABLE:
-    FORMAT_OPTIONS['JXL'] = {'ext': 'jxl', 'supports_quality': True}
-
-FORMAT_OPTIONS = {k: v for k, v in FORMAT_OPTIONS.items() if v is not None}
-
-# Helper functions for JPEG XL conversion using FFmpeg
-def save_as_jxl(input_image_path, output_path, quality=100):
-    """Convert an image to JPEG XL format using FFmpeg."""
-    quality_flag = f"-q:v {quality}"  # FFmpeg quality flag
-    subprocess.run(["ffmpeg", "-i", input_image_path, quality_flag, output_path], check=True)
-
-def open_jxl_as_image(jxl_path):
-    """Open a JPEG XL image by converting it to a temporary PNG using FFmpeg."""
-    temp_png = jxl_path + ".temp.png"
-    try:
-        subprocess.run(["ffmpeg", "-i", jxl_path, temp_png], check=True)
-        image = Image.open(temp_png)
-    finally:
-        if os.path.exists(temp_png):
-            os.remove(temp_png)
-    return image
-
-def open_raw_as_image(raw_path):
-    print(f"Using rawpy to open {raw_path}")
-    with rawpy.imread(raw_path) as raw:
-        rgb_array = raw.postprocess()
-    return Image.fromarray(rgb_array)
-
-def download_model(url, model_name, model_dir='models'):
-    os.makedirs(model_dir, exist_ok=True)
-    model_path = os.path.join(model_dir, model_name)
-    if not os.path.exists(model_path):
-        print(f"Downloading model: {model_name}")
-        urllib.request.urlretrieve(url, model_path)
-    else:
-        print(f"Model already exists: {model_name}")
-    return model_path
-
-class ImageConverterApp:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Simple Image Converter")
-
-        # Set fixed size limits for the window to prevent unintended expansion
-        self.root.minsize(600, 600)
-        self.root.maxsize(1000, 800)
+class ImageThumbnail:
+    def __init__(self, file_path):
+        self.file_path = file_path
+        self.filename = os.path.basename(file_path)
+        self.processed = False
+        self.thumbnail = None
+        self.thumbnail_widget = None
         
-        # Initialize variables
-        self.selected_files = []
-        self.resize_files = []
-        self.upscale_files = []
-        self.thumbnails = []  # Store thumbnail references to prevent garbage collection
-        self.output_format = tk.StringVar(value='PNG')
-        self.output_directory = tk.StringVar()
-        self.quality = tk.IntVar(value=85)  # Default JPEG quality
-        self.thumbnail_labels = {}
-        self.thumbnail_size = 150  # Default thumbnail size
-        self.columns = 3  # Default number of columns for thumbnails
-        self.loading_thread = None  # Track the thumbnail loading thread
-        self.lock = threading.Lock()  # Lock to prevent concurrent thread issues
-
-        # Set up drag-and-drop
-        self.root.drop_target_register(DND_FILES)
-        self.root.dnd_bind('<<Drop>>', self.handle_dropped_files)
-
-        # Set up GUI
-        self.setup_gui()
-
-    def setup_gui(self):
-        # Create a notebook (tab control)
-        self.notebook = ttk.Notebook(self.root)
-        self.notebook.pack(fill='both', expand=True)
-
-        # Create frames for each tab
-        self.convert_tab = ttk.Frame(self.notebook)
-
-        # Add tabs
-        self.notebook.add(self.convert_tab, text="Convert")
-
-        # Move the existing GUI elements to convert_tab
-        self.build_convert_tab()
-        self.build_resize_tab()
-        self.build_upscale_tab()
-        
-    def build_convert_tab(self):
-        # File selection buttons
-        tk.Button(self.convert_tab, text="Select Images", command=self.select_files).grid(row=0, column=0, padx=5, pady=5)
-        tk.Button(self.convert_tab, text="Clear Selections", command=self.clear_selections).grid(row=0, column=1, padx=5, pady=5)
-
-        # Output format selection
-        tk.Label(self.convert_tab, text="Output Format").grid(row=1, column=0, padx=5, pady=5)
-        format_menu = ttk.Combobox(self.convert_tab, textvariable=self.output_format, values=list(FORMAT_OPTIONS.keys()), state="readonly")
-        format_menu.grid(row=1, column=1, padx=5, pady=5)
-        format_menu.bind("<<ComboboxSelected>>", self.toggle_quality_option)
-
-        # Quality setting for JPEG as a slider
-        self.quality_label = tk.Label(self.convert_tab, text="Quality (1-100):")
-        self.quality_label.grid(row=2, column=0, padx=5, pady=5)
-
-        self.quality_slider = tk.Scale(self.convert_tab, variable=self.quality, from_=1, to=100, orient=tk.HORIZONTAL)
-        self.quality_slider.grid(row=2, column=1, padx=5, pady=5)
-        self.toggle_quality_option()
-
-        # Bind arrow keys to control the slider on the main window
-        self.convert_tab.bind("<Left>", self.decrease_quality)
-        self.convert_tab.bind("<Right>", self.increase_quality)
-
-        # Output directory selection
-        tk.Button(self.convert_tab, text="Select Output Directory", command=self.select_output_directory).grid(row=3, column=0, padx=5, pady=5)
-        self.output_dir_display = tk.Label(self.convert_tab, text="No output directory selected. (Will create default)")
-        self.output_dir_display.grid(row=3, column=1, padx=5, pady=5)
-
-        # Image thumbnail preview area
-        self.thumbnail_frame = tk.Frame(self.convert_tab, bg="white")
-        self.thumbnail_frame.grid(row=4, column=0, columnspan=2, padx=5, pady=10, sticky='nsew')
-
-        # Make the row and column expandable
-        self.convert_tab.grid_rowconfigure(4, weight=1)  # Make row 4 expandable
-        self.convert_tab.grid_columnconfigure(0, weight=1)  # Make column 0 expandable
-        self.convert_tab.grid_columnconfigure(1, weight=1)  # Make column 1 expandable
-
-        self.canvas = tk.Canvas(self.thumbnail_frame, bg="white")
-        self.scrollbar = ttk.Scrollbar(self.thumbnail_frame, orient="vertical", command=self.canvas.yview)
-        self.scrollable_frame = tk.Frame(self.canvas, bg="white")
-        self.scrollable_frame.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
-
-        self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
-        self.canvas.configure(yscrollcommand=self.scrollbar.set)
-
-        # Use pack for better control over resizing
-        self.canvas.pack(side="left", fill="both", expand=True)
-        self.scrollbar.pack(side="right", fill="y")
-
-        # Convert button
-        tk.Button(self.convert_tab, text="Convert Images", command=self.convert_images_threaded).grid(row=5, column=0, columnspan=2, pady=10)
-
-        # Track window resizing to dynamically adjust thumbnail size and canvas width
-        self.convert_tab.bind("<Configure>", self.debounce_resize_event)
-
-    def build_resize_tab(self):
-        self.resize_tab = ttk.Frame(self.notebook)
-        self.notebook.add(self.resize_tab, text="Resize")
-
-        # Select Images and Clear Selections Buttons
-        tk.Button(self.resize_tab, text="Select Images", command=self.select_resize_files).grid(row=0, column=0, padx=5, pady=5)
-        clear_button = ttk.Button(self.resize_tab, text="Clear Selections", command=self.clear_resize_selections)
-        clear_button.grid(row=0, column=1, columnspan=2, pady=(10, 5))
-
-
-        # Resize Mode Dropdown (Pixel or Percentage)
-        self.resize_mode = tk.StringVar(value="Percentage")
-        tk.Label(self.resize_tab, text="Resize Mode:").grid(row=1, column=0, padx=5, pady=5)
-        self.resize_mode_dropdown = tk.OptionMenu(self.resize_tab, self.resize_mode, "Pixels", "Percentage", command=self.toggle_resize_mode)
-        self.resize_mode_dropdown.grid(row=1, column=1, padx=5, pady=5)
-
-        # Width and Height Entry Fields (set default text to the current image size)
-        self.resize_width_label = tk.Label(self.resize_tab, text="Width:")
-        self.resize_width_label.grid(row=2, column=0, sticky="e", padx=5, pady=5)
-
-        self.resize_width = tk.Entry(self.resize_tab)
-        self.resize_width.grid(row=2, column=1, padx=5, pady=5)
-
-        self.resize_height_label = tk.Label(self.resize_tab, text="Height:")
-        self.resize_height_label.grid(row=3, column=0, sticky="e", padx=5, pady=5)
-
-        self.resize_height = tk.Entry(self.resize_tab)
-        self.resize_height.grid(row=3, column=1, padx=5, pady=5)
-
-        # Keep Aspect Ratio Checkbox
-        self.keep_aspect = tk.BooleanVar(value=True)
-        self.keep_aspect_check = tk.Checkbutton(self.resize_tab, text="Keep Aspect Ratio", variable=self.keep_aspect)
-        self.keep_aspect_check.grid(row=3, column=0, columnspan=2, padx=5, pady=5)
-
-        # Percentage Slider (initially hidden)
-        self.percentage_slider = tk.Scale(
-            self.resize_tab,
-            from_=1,
-            to=300,
-            orient=tk.HORIZONTAL,
-            label="Percentage",
-            state=tk.DISABLED,
-            command=self.update_resized_dimensions  # No lambda needed
-        )
-        self.percentage_slider.grid(row=5, column=0, columnspan=2, padx=5, pady=5)
-
-        # Output Directory Selection
-        tk.Button(self.resize_tab, text="Select Output Directory", command=self.select_output_directory).grid(row=6, column=0, padx=5, pady=5)
-        self.output_dir_label_resize = tk.Label(self.resize_tab, text="No output directory selected.")
-        self.output_dir_label_resize.grid(row=6, column=1, padx=5, pady=5)
-
-        # Thumbnail frame (adjust size, shrink down to fit within the window better)
-        self.thumbnail_frame_resize = tk.Frame(self.resize_tab, bg="white", height=250)  # Adjusted size
-        self.thumbnail_frame_resize.grid(row=7, column=0, columnspan=2, padx=5, pady=5, sticky="nsew")
-
-        self.resize_canvas = tk.Canvas(self.thumbnail_frame_resize, bg="white")
-        self.resize_scrollbar = ttk.Scrollbar(self.thumbnail_frame_resize, orient="vertical", command=self.resize_canvas.yview)
-        self.resize_scrollable_frame = tk.Frame(self.resize_canvas, bg="white")
-        self.resize_scrollable_frame.bind("<Configure>", lambda e: self.resize_canvas.configure(scrollregion=self.resize_canvas.bbox("all")))
-
-        self.resize_canvas.create_window((0, 0), window=self.resize_scrollable_frame, anchor="nw")
-        self.resize_canvas.configure(yscrollcommand=self.resize_scrollbar.set)
-
-        self.resize_canvas.pack(side="left", fill="both", expand=True)
-        self.resize_scrollbar.pack(side="right", fill="y")
-
-        # Original and resized size labels
-        self.original_size_label = tk.Label(self.resize_tab, text="Original: —")
-        self.original_size_label.grid(row=8, column=0, padx=5, pady=5)
-
-        self.resized_size_label = tk.Label(self.resize_tab, text="Resized: —")
-        self.resized_size_label.grid(row=8, column=1, padx=5, pady=5)
-
-        # Resize Button
-        tk.Button(self.resize_tab, text="Resize Images", command=self.resize_images_threaded).grid(row=8, column=0, columnspan=2, pady=10)
-
-        # Adjust column/row weights to ensure resizing behaves well
-        self.resize_tab.grid_rowconfigure(7, weight=1)  # Make the thumbnail area expandable
-        self.resize_tab.grid_columnconfigure(0, weight=1)
-        self.resize_tab.grid_columnconfigure(1, weight=1)
-
-        # Set initial visibility
-        self.toggle_resize_mode("Percentage")  # Ensure the correct elements are visible initially
-
-        # This function will clear the placeholder text when the user starts typing
-        def clear_placeholder_text(event, entry, placeholder):
-            if entry.get() == placeholder:
-                entry.delete(0, tk.END)
-
-        # This function will reset the placeholder text if the field is left empty
-        def restore_placeholder_text(event, entry, placeholder):
-            if entry.get() == "":
-                entry.insert(0, placeholder)
-
-        # Add event listeners for the width/height fields
-        self.resize_width.bind("<FocusIn>", lambda event: clear_placeholder_text(event, self.resize_width, "Width"))
-        self.resize_width.bind("<FocusOut>", lambda event: restore_placeholder_text(event, self.resize_width, "Width"))
-        self.resize_height.bind("<FocusIn>", lambda event: clear_placeholder_text(event, self.resize_height, "Height"))
-        self.resize_height.bind("<FocusOut>", lambda event: restore_placeholder_text(event, self.resize_height, "Height"))
-
-        self.resize_tab.drop_target_register(DND_FILES)
-        self.resize_tab.dnd_bind('<<Drop>>', self.handle_resize_dropped_files)
-
-        self.bind_arrow_keys()  # Bind arrow keys for fine control of the slider
-
-    def build_upscale_tab(self):
-        self.upscale_tab = ttk.Frame(self.notebook)
-        self.notebook.add(self.upscale_tab, text="Upscale")
-
-        # File selection buttons
-        button_frame = tk.Frame(self.upscale_tab)
-        button_frame.pack(pady=10)
-
-        tk.Button(button_frame, text="Select Images", command=self.select_upscale_files).pack(side="left", padx=10)
-        tk.Button(button_frame, text="Clear Selections", command=self.clear_upscale_selections).pack(side="left", padx=10)
-        tk.Button(button_frame, text="Upscale", command=self.start_upscale_thread).pack(side="left", padx=10)
-
-        # Option for upscale mode
-        self.upscale_mode = tk.StringVar(value="Factor")
-        mode_frame = tk.Frame(self.upscale_tab)
-        mode_frame.pack(pady=5)
-
-        tk.Radiobutton(mode_frame, text="By Factor", variable=self.upscale_mode, value="Factor", command=self.toggle_upscale_mode).pack(side="left", padx=10)
-        tk.Radiobutton(mode_frame, text="By Target Size", variable=self.upscale_mode, value="Size", command=self.toggle_upscale_mode).pack(side="left", padx=10)
-
-        # Input for upscale value
-        self.factor_entry = tk.Entry(self.upscale_tab)
-        self.factor_entry.insert(0, "2")
-        self.factor_entry.pack(pady=5)
-
-        self.size_entry = tk.Entry(self.upscale_tab)
-        self.size_entry.insert(0, "1920x1080")
-        self.size_entry.pack(pady=5)
-        self.size_entry.pack_forget()  # Hide initially
-
-        # File list and preview
-        self.thumbnail_frame_upscale = tk.Frame(self.upscale_tab, bg="white", height=250)
-        self.thumbnail_frame_upscale.pack(fill="both", expand=True, padx=5, pady=5)
-
-        self.upscale_canvas = tk.Canvas(self.thumbnail_frame_upscale, bg="white")
-        self.upscale_scrollbar = ttk.Scrollbar(self.thumbnail_frame_upscale, orient="vertical", command=self.upscale_canvas.yview)
-        self.upscale_scrollable_frame = tk.Frame(self.upscale_canvas, bg="white")
-        self.upscale_scrollable_frame.bind("<Configure>", lambda e: self.upscale_canvas.configure(scrollregion=self.upscale_canvas.bbox("all")))
-
-        self.upscale_canvas.create_window((0, 0), window=self.upscale_scrollable_frame, anchor="nw")
-        self.upscale_canvas.configure(yscrollcommand=self.upscale_scrollbar.set)
-
-        self.upscale_canvas.pack(side="left", fill="both", expand=True)
-        self.upscale_scrollbar.pack(side="right", fill="y")
-
-        # Enable drag and drop
-        self.upscale_tab.drop_target_register(DND_FILES)
-        self.upscale_tab.dnd_bind('<<Drop>>', self.handle_drop_upscale)
-
-    def toggle_upscale_mode(self):
-        if self.upscale_mode.get() == "Factor":
-            self.factor_entry.pack(pady=5)
-            self.size_entry.pack_forget()
-        else:
-            self.factor_entry.pack_forget()
-            self.size_entry.pack(pady=5)
-
-    def select_upscale_files(self):
-        file_paths = filedialog.askopenfilenames(filetypes=[("Image Files", "*.jpg;*.png;*.jpeg")])
-        if file_paths:
-            self.upscale_files = file_paths  # Store selected files for upscaling
-            self.update_upscale_thumbnails()  # Update thumbnails for upscaling
-
-    def clear_upscale_selections(self):
-        self.upscale_files.clear()  # Clear the upsize files list
-        self.update_upscale_thumbnails()  # Clear the displayed thumbnails
-
-    def update_upscale_thumbnails(self):
-        # Remove existing thumbnails from the canvas
-        for widget in self.upscale_scrollable_frame.winfo_children():
-            widget.destroy()
-
-        # Display new thumbnails for selected files
-        for file in self.upscale_files:
-            img = Image.open(file)
-            img.thumbnail((100, 100))  # Resize the image for thumbnail
-            photo = ImageTk.PhotoImage(img)
-            label = tk.Label(self.upscale_scrollable_frame, image=photo)
-            label.image = photo  # Keep a reference to avoid garbage collection
-            label.pack(side="left", padx=5, pady=5)
-
-    def handle_drop_upscale(self, event):
-        # Get the dropped file paths from the event
-        dropped_files = event.data.splitlines()
-
-        # Add files to the upsize_files list
-        for file_path in dropped_files:
-            if file_path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif', '.tiff')):
-                self.upscale_files.append(file_path)
-                # Create and show thumbnail in the upscale tab
-                self.create_thumbnail_upscale(file_path)
-
-    def create_thumbnail_upscale(self, file_path):
-        # Create an image thumbnail for the dropped file
+    def create_thumbnail(self, size=(150, 120)):
         try:
-            # Open the image and create a thumbnail
-            image = Image.open(file_path)
-            image.thumbnail((100, 100))  # Resize to 100x100
-            thumbnail = ImageTk.PhotoImage(image)
-
-            # Create a new label with the thumbnail image
-            thumbnail_label = tk.Label(self.upscale_scrollable_frame, image=thumbnail)
-            thumbnail_label.image = thumbnail  # Keep reference to avoid garbage collection
-            thumbnail_label.pack(side="left", padx=5, pady=5)
-
-            # Add metadata (file size, dimensions) under the thumbnail
-            metadata_label = tk.Label(self.upscale_scrollable_frame, text=f"{os.path.basename(file_path)}\n"
-                                                                        f"Size: {image.size[0]}x{image.size[1]}\n"
-                                                                        f"File: {self.get_file_size(file_path)}")
-            metadata_label.pack(side="left", padx=5, pady=5)
-        except Exception as e:
-            print(f"Error creating thumbnail for {file_path}: {e}")
-
-    def get_file_size(self, file_path):
-        # Return the file size in a human-readable format (bytes, KB, MB)
-        file_size = os.path.getsize(file_path)
-        for unit in ['bytes', 'KB', 'MB', 'GB']:
-            if file_size < 1024:
-                return f"{file_size:.2f} {unit}"
-            file_size /= 1024
-
-    def start_upscale_thread(self):
-        threading.Thread(target=self.upscale_images, daemon=True).start()
-
-    def upscale_images(self):
-        if not self.upscale_files:
-            print("No files selected.")
-            return
-
-        upscale_by_factor = self.upscale_mode.get() == "Factor"
-
-        # Determine thread count based on CPU usage
-        max_threads = os.cpu_count() or 4
-        current_load = psutil.cpu_percent(interval=1)
-        thread_count = max(1, int(max_threads * (1 - current_load / 100)))
-
-        print(f"Upscaling with {thread_count} threads (CPU load: {current_load}%)")
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=thread_count) as executor:
-            futures = [executor.submit(self.process_image, file, upscale_by_factor) for file in self.upscale_files]
-            for future in concurrent.futures.as_completed(futures):
-                try:
-                    future.result()
-                except Exception as e:
-                    print(f"Error: {e}")
-
-        print("Upscaling complete.")
-
-    def process_image(self, file_path, by_factor):
-        try:
-            img = Image.open(file_path)
-            if by_factor:
-                factor = float(self.factor_entry.get())
-                new_size = (int(img.width * factor), int(img.height * factor))
+            if self.file_path.lower().endswith(('.cr2', '.nef', '.arw', '.dng', '.raf')):
+                # Handle RAW files
+                with rawpy.imread(self.file_path) as raw:
+                    rgb = raw.postprocess()
+                    img = Image.fromarray(rgb)
             else:
-                width, height = map(int, self.size_entry.get().lower().split("x"))
-                new_size = (width, height)
-
-            # Detect whether the image is art or photo (basic heuristic based on resolution)
-            is_art = self.is_art_image(img)
+                # Handle regular image files
+                img = Image.open(self.file_path)
             
-            if is_art:
-                img = self.upscale_with_waifu2x(img, new_size)
-            else:
-                img = self.upscale_with_opencv_dnn(img, new_size)
-
-            base, ext = os.path.splitext(file_path)
-            output_path = f"{base}_upscaled{ext}"
-            img.save(output_path)
-
-            print(f"Saved upscaled image to: {output_path}")
+            img.thumbnail(size, Image.Resampling.LANCZOS)
+            self.thumbnail = ImageTk.PhotoImage(img)
+            return self.thumbnail
         except Exception as e:
-            print(f"Failed to process {file_path}: {e}")
+            print(f"Error creating thumbnail for {self.filename}: {e}")
+            return None
 
-    def is_art_image(self, img):
-        # Convert to grayscale
-        gray = img.convert("L")
-        
-        # Edge detection
-        edges = gray.filter(ImageFilter.FIND_EDGES)
-        edge_data = np.array(edges)
-        edge_mean = np.mean(edge_data)
-
-        # Color variance
-        stat = ImageStat.Stat(img)
-        color_variance = sum(stat.var) / len(stat.var)
-
-        # Heuristic: High edges + low color variance → likely art
-        if edge_mean > 20 and color_variance < 5000:
-            return True
-        return False
-
-    def upscale_with_waifu2x(self, file_path):
-        # Load the image
-        img = Image.open(file_path)
-        
-        # Use Waifu2x for upscaling
-        upscaled_image = waifu2x.upscale(img)
-
-        # Save the upscaled image
-        base, ext = os.path.splitext(file_path)
-        output_path = f"{base}_upscaled{ext}"
-        upscaled_image.save(output_path)
-
-        print(f"Saved upscaled image to: {output_path}")
-
-    def select_model_by_factor(self, factor):
-        model_map = {
-            2: 'EDSR_x2.pb',
-            3: 'EDSR_x3.pb',
-            4: 'EDSR_x4.pb'
-        }
-        
-        return model_map.get(factor, 'EDSR_x3.pb')  # Default to EDSR_x3 if not found
-
-    def upscale_with_opencv_dnn(self, img, factor):
-        model_urls = {
-            'EDSR_x2.pb': 'https://raw.githubusercontent.com/fannymonkey/EDSR/master/weights/EDSR_x2.pb',
-            'EDSR_x3.pb': 'https://raw.githubusercontent.com/fannymonkey/EDSR/master/weights/EDSR_x3.pb',
-            'EDSR_x4.pb': 'https://raw.githubusercontent.com/fannymonkey/EDSR/master/weights/EDSR_x4.pb',
-        }
-        model_name = self.select_model_by_factor(factor)
-        model_path = download_model(model_urls[model_name], model_name)
-
-        # Convert PIL Image to OpenCV format
-        img_cv = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-
-        # Prepare blob and set input
-        blob = cv2.dnn.blobFromImage(img_cv, 1.0, (img_cv.shape[1], img_cv.shape[0]), (0, 0, 0), swapRB=False, crop=False)
-        net = cv2.dnn.readNetFromTensorflow(model_path)
-        net.setInput(blob)
-
-        # Forward pass
-        output = net.forward()
-
-        # Post-process output
-        output = output.squeeze().transpose((1, 2, 0))
-        output = np.clip(output, 0, 255).astype(np.uint8)
-
-        # Convert back to PIL Image
-        upscaled_img = Image.fromarray(cv2.cvtColor(output, cv2.COLOR_BGR2RGB))
-        return upscaled_img
-
-#<-----------------Resize Tab helper functions---------------->
-
-    def bind_arrow_keys(self):
-        self.root.bind("<Left>", lambda event: self.adjust_slider_value(-1))
-        self.root.bind("<Right>", lambda event: self.adjust_slider_value(1))
-
-    def adjust_slider_value(self, delta):
-        # Get the current value of the slider
-        current_value = self.percentage_slider.get()
-        # Adjust the value by delta (either +1 or -1)
-        new_value = current_value + delta
-        # Ensure the new value is within the allowed range
-        new_value = max(1, min(300, new_value))  # Limit between 1 and 300 (or whatever range you set)
-        # Set the new value and update the resized dimensions
-        self.percentage_slider.set(new_value)
-        self.update_resized_dimensions(str(new_value))  # Update resized dimensions based on new value
-
-    def update_resized_dimensions(self, percent_str=None):
+    def get_exif_data(self):
+        """Extract EXIF data from the original image"""
         try:
-            if percent_str is None:
-                percent = self.percentage_slider.get()  # If no argument, get from slider
-            else:
-                percent = int(percent_str)
-
-            if not hasattr(self, 'original_width') or not hasattr(self, 'original_height'):
-                print("Original dimensions not set.")
-                return
-
-            new_width = int(self.original_width * percent / 100)
-            new_height = int(self.original_height * percent / 100)
-
-            # Update the resized dimension label
-            self.resized_size_label.config(
-                text=f"Resized: {new_width} x {new_height}"
-            )
-
-        except Exception as e:
-            print(f"Failed to calculate resized dimensions: {e}")
-
-    def clear_resize_selections(self):
-        # Clear the selected files list
-        self.resize_files.clear()
-
-        # Clear the thumbnail display
-        for widget in self.thumbnail_frame_resize.winfo_children():
-            widget.destroy()
-
-
-        # Reset original/resized size labels
-        self.original_size_label.config(text="Original: —")
-        self.resized_size_label.config(text="Resized: —")
-
-        # Clear width/height fields
-        self.resize_width.delete(0, tk.END)
-        self.resize_height.delete(0, tk.END)
-
-        # Reset the slider to 100%
-        self.percentage_slider.set(100)
-
-        # Disable the slider again (optional)
-        # self.percentage_slider.config(state="disabled")
-
-
-
-    def toggle_resize_mode(self, mode):
-        if mode == "Pixels":
-            # Show width/height labels and entries
-            self.resize_width_label.grid(row=2, column=0, sticky="e", padx=5, pady=5)
-            self.resize_width.grid(row=2, column=1, padx=5, pady=5)
-
-            self.resize_height_label.grid(row=3, column=0, sticky="e", padx=5, pady=5)
-            self.resize_height.grid(row=3, column=1, padx=5, pady=5)
-
-            # Hide percentage slider
-            self.percentage_slider.grid_forget()
-            self.keep_aspect_check.grid(row=4, column=0, columnspan=2, padx=5, pady=5)
-            self.keep_aspect_check.configure(state="normal")
-        elif mode == "Percentage":
-            # Hide width/height labels and entries
-            self.resize_width_label.grid_forget()
-            self.resize_width.grid_forget()
-
-            self.resize_height_label.grid_forget()
-            self.resize_height.grid_forget()
-
-            # Show percentage slider
-            self.percentage_slider.configure(state="normal")
-            self.percentage_slider.set(100)
-            self.percentage_slider.grid(row=5, column=0, columnspan=2, padx=5, pady=5)
-            self.keep_aspect.set(True)
-            self.keep_aspect_check.grid_forget()  # hide the checkbox
-
-    def select_resize_files(self):
-        files = filedialog.askopenfilenames(title="Select Images", filetypes=[("Image Files", "*.png *.jpg *.jpeg *.bmp *.tiff *.heic")])
-
-        if not files:
-            return
-
-        self.resize_files = list(files)
-        self.display_resize_thumbnails(self.resize_files)
-
-        # Load the first image to extract dimensions
-        img = Image.open(self.resize_files[0])
-        self.original_width, self.original_height = img.size  # Get original image dimensions
-
-        # Update the original dimension label
-        self.original_size_label.config(
-            text=f"Original: {self.original_width} x {self.original_height}"
-        )
-
-        # Update the width and height text boxes with the original image size
-        self.resize_width.delete(0, tk.END)
-        self.resize_width.insert(0, str(self.original_width))
-
-        self.resize_height.delete(0, tk.END)
-        self.resize_height.insert(0, str(self.original_height))
-
-        # Update resized dimensions initially based on percentage slider value
-        self.update_resized_dimensions()
-
-
-    def update_resize_fields_with_image(self):
-        if not self.resize_files:
-            return
-
-        try:
-            img = Image.open(self.resize_files[0])
-            width, height = img.size
-            self.resize_width.delete(0, tk.END)
-            self.resize_width.insert(0, str(width))
-
-            self.resize_height.delete(0, tk.END)
-            self.resize_height.insert(0, str(height))
-            self.original_size_label.config(text=f"Original: {width} x {height}")
-        except Exception as e:
-            print(f"Failed to get image size: {e}")
-
-
-    def display_resize_thumbnails(self, files):
-        if not files:
-            return
-
-        file = files[0]
-        try:
-            img = Image.open(file)
-            img.thumbnail((300, 300))  # Resize for display
-            self.thumbnail_image = ImageTk.PhotoImage(img)  # Keep a reference!
-
-            if hasattr(self, 'thumbnail_label'):
-                self.thumbnail_label.configure(image=self.thumbnail_image)
-            else:
-                self.thumbnail_label = tk.Label(self.thumbnail_frame_resize, image=self.thumbnail_image, bg="white")
-                self.thumbnail_label.pack(padx=5, pady=5)
-
-        except Exception as e:
-            print(f"Failed to load thumbnail: {e}")
-
-    def resize_images_threaded(self):
-        if not self.resize_files:
-            messagebox.showwarning("No Files", "Please select images to resize.")
-            return
-
-        output_dir = self.output_directory.get()
-        if not output_dir:
-            output_dir = os.path.join(os.path.dirname(self.resize_files[0]), "(resized)")
-        os.makedirs(output_dir, exist_ok=True)
-
-        resize_by_pct = self.resize_mode.get() == "Percentage"
-        pct = self.percentage_slider.get()
-
-        width = self.resize_width.get()
-        height = self.resize_height.get()
-        keep_aspect = self.keep_aspect.get()
-
-        def parse_dim(value):
-            try:
-                return int(value) if value else None
-            except ValueError:
+            if self.file_path.lower().endswith(('.cr2', '.nef', '.arw', '.dng', '.raf')):
+                # RAW files - EXIF handling is limited
                 return None
-
-        width = parse_dim(width)
-        height = parse_dim(height)
-
-        max_workers = max(1, os.cpu_count() - 1)
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(self.resize_single_image, path, output_dir, resize_by_pct, pct, width, height, keep_aspect): path
-                for path in self.resize_files
-            }
-
-            failed = []
-            for future in as_completed(futures):
-                file = futures[future]
-                try:
-                    result = future.result()
-                    if not result:
-                        failed.append(file)
-                except Exception as e:
-                    print(f"Exception while resizing {file}: {e}")
-                    failed.append(file)
-
-        if failed:
-            messagebox.showwarning("Some Failures", f"{len(failed)} image(s) failed to resize.")
-        else:
-            messagebox.showinfo("Success", f"All images resized successfully to {output_dir}")
-
-    def resize_single_image(self, path, output_dir, by_pct, pct, width, height, keep_aspect):
-        try:
-            img = Image.open(path)
-
-            if by_pct:
-                new_w = int(img.width * (pct / 100))
-                new_h = int(img.height * (pct / 100))
             else:
-                new_w = width or img.width
-                new_h = height or img.height
-                if keep_aspect and (width and not height):
-                    new_h = int((new_w / img.width) * img.height)
-                elif keep_aspect and (height and not width):
-                    new_w = int((new_h / img.height) * img.width)
-
-            resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-            output_path = os.path.join(output_dir, os.path.basename(path))
-            resized.save(output_path)
-            return True
+                img = Image.open(self.file_path)
+                return img.getexif()
         except Exception as e:
-            print(f"Error resizing {path}: {e}")
-            return False
+            print(f"Error extracting EXIF from {self.filename}: {e}")
+            return None
+
+class ImageFrame(tk.Frame):
+    def __init__(self, parent, on_remove_callback):
+        super().__init__(parent)
+        self.on_remove_callback = on_remove_callback
+        self.image_data = None
+        self.setup_ui()
         
-    def handle_resize_dropped_files(self, event):
-        dropped_files = self.root.tk.splitlist(event.data)
-        print(f"Dropped files (resize): {dropped_files}")
-
-        self.selected_resize_files = list(dropped_files)
-        self.show_resize_thumbnails(self.selected_resize_files)
-
-        # Load first image to get original dimensions
-        try:
-            with Image.open(self.selected_resize_files[0]) as img:
-                width, height = img.size
-                self.original_size_label.config(text=f"Original: {width}x{height}")
-                self.update_resized_dimensions(str(self.percentage_slider.get()))
-                self.resize_width.delete(0, tk.END)
-                self.resize_width.insert(0, str(width))
-
-                self.resize_height.delete(0, tk.END)
-                self.resize_height.insert(0, str(height))
-        except Exception as e:
-            self.original_size_label.config(text="Original: —")
-            self.resized_size_label.config(text="Resized: —")
-            print(f"Error getting image size: {e}")
-
-
-    def decrease_quality(self, event=None):
-        # Check if the slider is currently visible
-        if self.quality_label.winfo_ismapped() and self.quality_slider.winfo_ismapped():
-            current_quality = self.quality.get()
-            if current_quality > 1:  # Prevent going below 1
-                self.quality.set(current_quality - 1)
-
-    def increase_quality(self, event=None):
-        # Check if the slider is currently visible
-        if self.quality_label.winfo_ismapped() and self.quality_slider.winfo_ismapped():
-            current_quality = self.quality.get()
-            if current_quality < 100:  # Prevent going above 100
-                self.quality.set(current_quality + 1)
-
-    def toggle_quality_option(self, event=None):
-        # Show or hide quality options based on format support
-        format_key = self.output_format.get()
-        if FORMAT_OPTIONS[format_key]['supports_quality']:
-            self.quality_label.grid()
-            self.quality_slider.grid()
-        else:
-            self.quality_label.grid_remove()
-            self.quality_slider.grid_remove()
-
-    def debounce_resize_event(self, event=None):
-        # Only resize when width changes significantly; debounce resizing
-        if hasattr(self, "_resize_job"):
-            self.root.after_cancel(self._resize_job)
-        self._resize_job = self.root.after(500, self.adjust_canvas_and_thumbnails)
-
-    def adjust_canvas_and_thumbnails(self):
-        # Calculate columns based on canvas width and thumbnail size
-        canvas_width = self.thumbnail_frame.winfo_width()
-        new_columns = max(1, canvas_width // (self.thumbnail_size + 10))
+    def setup_ui(self):
+        # Image label (larger thumbnail) - using pixels instead of characters
+        self.image_label = tk.Label(self, bg="lightgray", width=160, height=120)
+        self.image_label.pack(padx=5, pady=5)
         
-        # Only update if column count changes
-        if new_columns != self.columns:
-            self.columns = new_columns
-            print(f"Adjusted columns to: {self.columns}")
-            self.update_thumbnail_preview_async()
-
-    def handle_dropped_files(self, event):
-        # Handle files dragged and dropped into the window
-        dropped_files = self.root.tk.splitlist(event.data)
-        print(f"Dropped files: {dropped_files}")  # Debug statement
-        self.selected_files.extend(dropped_files)
+        # Remove button (X) overlayed on image - smaller and positioned better
+        self.remove_btn = tk.Button(
+            self.image_label, text="×", font=("Arial", 8, "bold"),
+            fg="white", bg="red", width=1, height=1,
+            command=self.remove_image, bd=0
+        )
+        self.remove_btn.place(x=5, y=5)
         
-        for file in dropped_files:
-            ext = os.path.splitext(file)[1].lower()
-            if ext.lower() in ['.nef', '.cr2', '.arw', '.dng']:
-                print(f"Handling supported RAW file: {file}")  # Debug statement
-            else:
-                print(f"Unsupported file format dropped: {file}")  # Debug statement
+        # Filename label
+        self.filename_label = tk.Label(self, text="", font=("Arial", 9), wraplength=150)
+        self.filename_label.pack(pady=(0, 5))
+        
+        # Status indicator (bottom right of image)
+        self.status_label = tk.Label(self.image_label, text="", font=("Arial", 16), bg="lightgray")
+        self.status_label.place(relx=1.0, rely=1.0, anchor="se", x=-5, y=-5)
+        
+    def set_image(self, image_data):
+        self.image_data = image_data
+        thumbnail = image_data.create_thumbnail()
+        if thumbnail:
+            self.image_label.config(image=thumbnail, width=160, height=120)
+            self.image_label.image = thumbnail  # Keep a reference
+        self.filename_label.config(text=image_data.filename)
+        
+    def remove_image(self):
+        if self.on_remove_callback and self.image_data:
+            self.on_remove_callback(self.image_data)
+            
+    def mark_processed(self):
+        self.status_label.config(text="✓", fg="green")
+        if self.image_data:
+            self.image_data.processed = True
 
-        self.update_thumbnail_preview_async()
-
-    def select_files(self):
-        # Open file dialog for image selection
-        filetypes = [("Image files", "*.png *.jpg *.jpeg *.bmp *.tiff *.heic *.dng *.cr2 *.arw *.nef"), ("All files", "*.*")]
-        selected = filedialog.askopenfilenames(title="Select Images", filetypes=filetypes)
-        self.selected_files.extend(selected)
-        print(f"Selected files: {selected}")
-        self.update_thumbnail_preview_async()
-
-    def clear_selections(self):
-        # Clear selected files and thumbnails
-        self.selected_files.clear()
-        self.thumbnails.clear()
-        for widget in self.scrollable_frame.winfo_children():
-            widget.destroy()
-        print("Selections cleared.")
-
+class BaseTab(tk.Frame):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.images = []
+        self.output_dir = None
+        self.setup_ui()
+        self.setup_drag_drop()
+        
+    def setup_ui(self):
+        # Drop zone
+        self.drop_frame = tk.Frame(self, bg="lightblue", height=80)
+        self.drop_frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        drop_label = tk.Label(
+            self.drop_frame, 
+            text="Drag and drop images anywhere on this tab",
+            bg="lightblue", font=("Arial", 12)
+        )
+        drop_label.pack(expand=True)
+        
+        # Scrollable thumbnail area
+        self.setup_thumbnail_area()
+        
+        # Controls frame
+        self.controls_frame = tk.Frame(self)
+        self.controls_frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        # Output directory selection
+        self.output_btn = tk.Button(
+            self.controls_frame, text="Select Output Directory",
+            command=self.select_output_directory
+        )
+        self.output_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.output_label = tk.Label(
+            self.controls_frame, text="Output: (default folder will be created)",
+            font=("Arial", 9), fg="gray"
+        )
+        self.output_label.pack(side=tk.LEFT, padx=10)
+        
+        # EXIF preservation checkbox
+        self.preserve_exif = tk.BooleanVar(value=True)
+        self.exif_checkbox = tk.Checkbutton(
+            self.controls_frame, text="Preserve EXIF data",
+            variable=self.preserve_exif
+        )
+        self.exif_checkbox.pack(side=tk.LEFT, padx=10)
+        
+        # Clear selections button
+        self.clear_btn = tk.Button(
+            self.controls_frame, text="Clear All",
+            command=self.clear_all_images, bg="orange", fg="white"
+        )
+        self.clear_btn.pack(side=tk.RIGHT, padx=5)
+        
+        # Process button
+        self.process_btn = tk.Button(
+            self.controls_frame, text="Process Images",
+            command=self.process_images, bg="green", fg="white"
+        )
+        self.process_btn.pack(side=tk.RIGHT, padx=5)
+        
+        # Add tab-specific controls
+        self.setup_controls()
+        
+    def setup_thumbnail_area(self):
+        # Canvas and scrollbar for thumbnails
+        canvas_frame = tk.Frame(self)
+        canvas_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        self.canvas = tk.Canvas(canvas_frame, height=150)
+        scrollbar = ttk.Scrollbar(canvas_frame, orient=tk.HORIZONTAL, command=self.canvas.xview)
+        self.canvas.configure(xscrollcommand=scrollbar.set)
+        
+        self.canvas.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        # Frame inside canvas for thumbnails
+        self.thumbnails_frame = tk.Frame(self.canvas)
+        self.canvas.create_window((0, 0), window=self.thumbnails_frame, anchor="nw")
+        
+    def setup_drag_drop(self):
+        # Enable drag and drop for the entire tab
+        self.drop_target_register(DND_FILES)
+        self.dnd_bind('<<Drop>>', self.on_drop)
+        
+        # Also enable for child widgets to ensure coverage
+        self.drop_frame.drop_target_register(DND_FILES)
+        self.drop_frame.dnd_bind('<<Drop>>', self.on_drop)
+        
+    def get_default_output_dir(self):
+        # Override in subclasses to return tab-specific folder name
+        return "processed"
+        
     def select_output_directory(self):
-        # Open directory dialog for output folder
         directory = filedialog.askdirectory(title="Select Output Directory")
         if directory:
-            self.output_directory.set(directory)
-            self.output_dir_display.config(text=directory)
-            print(f"Output directory set to: {directory}")
-
-    def update_thumbnail_preview_async(self):
-        # Ensure that only one thread is loading thumbnails at any time
-        if self.loading_thread is None or not self.loading_thread.is_alive():
-            print("Starting thumbnail loading thread")
-            self.loading_thread = threading.Thread(target=self.update_thumbnail_preview, daemon=True)
-            self.loading_thread.start()
-
-    def update_thumbnail_preview(self):
-        """Load and display thumbnails for all selected files with a persistent removable 'X' button."""
-        with self.lock:
-            for widget in self.scrollable_frame.winfo_children():
-                widget.destroy()
-
-            unique_files = list(dict.fromkeys(self.selected_files))  # Remove duplicate files
-            self.thumbnails.clear()  # Prevent garbage collection issues
-
-            for index, file_path in enumerate(unique_files):
-                try:
-                    # For .arw files, generate a thumbnail from the raw data
-                    if file_path.lower().endswith('.arw'):
-                        img = generate_thumbnail(file_path)  # Use the rawpy-based thumbnail generator
-                    else:
-                        img = Image.open(file_path)  # For other file types, use PIL
-
-                    # Create the initial thumbnail with the "X" button only
-                    overlay_thumbnail = self.create_thumbnail_with_x(img)
-
-                    self.thumbnails.append(overlay_thumbnail)
-
-                    row, col = divmod(index, self.columns)
-                    label = tk.Label(self.scrollable_frame, image=overlay_thumbnail, bg="white")
-                    label.grid(row=row, column=col, padx=5, pady=5)
-
-                    # Bind click event to check if "X" button was clicked
-                    label.bind("<Button-1>", lambda e, path=file_path: self.remove_selection(path) if self.clicked_x(e) else None)
-                    self.thumbnail_labels[file_path] = {"label": label, "image": overlay_thumbnail}
-                except Exception as e:
-                    print(f"Failed to load image {file_path}: {e}")
-                    continue
-
-    def create_thumbnail_with_x(self, img):
-        """Create a thumbnail with an enlarged canvas and 'X' button overlay."""
-        canvas_size = (self.thumbnail_size + 20, self.thumbnail_size + 20)
-        offset = 10
-
-        canvas = Image.new("RGBA", canvas_size, (255, 255, 255, 0))
-        img.thumbnail((self.thumbnail_size, self.thumbnail_size))
-        canvas.paste(img, (offset, offset))
-
-        # Draw "X" on canvas
-        draw = ImageDraw.Draw(canvas)
-        self.draw_remove_icon(draw, canvas.width, canvas.height)
-
-        return ImageTk.PhotoImage(canvas)
-
-    def clicked_x(self, event):
-        """Detect if the click is on the 'X' button region of the thumbnail."""
-        # Coordinates and size of the "X" button
-        x_button_x, x_button_y, radius = 15, 15, 10  # Adjust to the position of the "X" button
-        x_button_bounds = (
-            x_button_x - radius, x_button_y - radius,
-            x_button_x + radius, x_button_y + radius
-        )
-        # Check if click falls within "X" button area
-        return x_button_bounds[0] <= event.x <= x_button_bounds[2] and x_button_bounds[1] <= event.y <= x_button_bounds[3]
-
-    def overlay_check_mark(self, file_path):
-        """Add a checkmark to an existing thumbnail while preserving the 'X' button, adapting for different aspect ratios."""
-        thumbnail_info = self.thumbnail_labels.get(file_path)
-        if thumbnail_info:
-            # Load and resize the image for the thumbnail
-            img = Image.open(file_path)
-            img.thumbnail((self.thumbnail_size, self.thumbnail_size))
-
-            # Set up the canvas and paste the thumbnail at an offset
-            canvas_size = (self.thumbnail_size + 20, self.thumbnail_size + 20)
-            offset = 10
-            canvas = Image.new("RGBA", canvas_size, (255, 255, 255, 0))
-            canvas.paste(img, (offset, offset))
-
-            # Draw the "X" button on the canvas
-            draw = ImageDraw.Draw(canvas)
-            self.draw_remove_icon(draw, canvas.width, canvas.height)
-
-            # Calculate the checkmark position based on actual thumbnail size within the canvas
-            actual_width, actual_height = img.size
-            checkmark_offset_x = offset + actual_width - 15
-            checkmark_offset_y = offset + actual_height - 15
-            circle_radius = 10
-
-            # Draw the green checkmark circle
-            draw.ellipse(
-                [
-                    (checkmark_offset_x - circle_radius, checkmark_offset_y - circle_radius),
-                    (checkmark_offset_x + circle_radius, checkmark_offset_y + circle_radius)
-                ],
-                fill="green"
+            self.output_dir = directory
+            self.output_label.config(
+                text=f"Output: {os.path.basename(directory)}/",
+                fg="black"
             )
+        else:
+            self.output_dir = None
+            self.output_label.config(
+                text="Output: (default folder will be created)",
+                fg="gray"
+            )
+        
+    def setup_controls(self):
+        # Override in subclasses
+        pass
+        
+    def on_drop(self, event):
+        files = event.data.split()
+        for file_path in files:
+            file_path = file_path.strip('{}')  # Remove braces if present
+            if self.is_valid_image(file_path):
+                self.add_image(file_path)
+                
+    def is_valid_image(self, file_path):
+        valid_extensions = {
+            '.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif', 
+            '.webp', '.heic', '.heif', '.cr2', '.nef', '.arw', 
+            '.dng', '.raf', '.gif'
+        }
+        return Path(file_path).suffix.lower() in valid_extensions
+        
+    def add_image(self, file_path):
+        image_data = ImageThumbnail(file_path)
+        self.images.append(image_data)
+        
+        # Create thumbnail frame
+        thumb_frame = ImageFrame(self.thumbnails_frame, self.remove_image)
+        thumb_frame.set_image(image_data)
+        thumb_frame.pack(side=tk.LEFT, padx=5, pady=5)
+        
+        image_data.thumbnail_widget = thumb_frame
+        
+        # Update canvas scroll region
+        self.thumbnails_frame.update_idletasks()
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        
+    def remove_image(self, image_data):
+        if image_data in self.images:
+            self.images.remove(image_data)
+            if image_data.thumbnail_widget:
+                image_data.thumbnail_widget.destroy()
+            
+            # Update canvas scroll region
+            self.thumbnails_frame.update_idletasks()
+            self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+    
+    def clear_all_images(self):
+        """Remove all images from the current tab"""
+        # Create a copy of the list to avoid modifying while iterating
+        images_to_remove = list(self.images)
+        
+        for image_data in images_to_remove:
+            self.remove_image(image_data)
+        
+        # Update canvas scroll region
+        self.thumbnails_frame.update_idletasks()
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+            
+    def process_images(self):
+        if not self.images:
+            messagebox.showwarning("No Images", "Please add images first.")
+            return
+            
+        # Determine output directory
+        if self.output_dir:
+            output_dir = self.output_dir
+        else:
+            # Create default folder next to the first image
+            first_image_dir = os.path.dirname(self.images[0].file_path)
+            default_folder = self.get_default_output_dir()
+            output_dir = os.path.join(first_image_dir, default_folder)
+            
+        # Create output directory if it doesn't exist
+        os.makedirs(output_dir, exist_ok=True)
+            
+        # Disable process button during processing
+        self.process_btn.config(state=tk.DISABLED, text="Processing...")
+        
+        # Process in separate thread
+        threading.Thread(
+            target=self.process_images_thread,
+            args=(output_dir,),
+            daemon=True
+        ).start()
+        
+    def process_images_thread(self, output_dir):
+        processed_count = 0
+        for image_data in self.images:
+            try:
+                self.process_single_image(image_data, output_dir)
+                # Update UI in main thread
+                self.after(0, image_data.thumbnail_widget.mark_processed)
+                processed_count += 1
+            except Exception as e:
+                print(f"Error processing {image_data.filename}: {e}")
+                
+        # Show completion message and re-enable button
+        self.after(0, lambda: messagebox.showinfo("Complete", f"Processed {processed_count} images successfully!"))
+        self.after(0, lambda: self.process_btn.config(state=tk.NORMAL, text="Process Images"))
+        
+    def process_single_image(self, image_data, output_dir):
+        # Override in subclasses
+        pass
 
-            # Draw the checkmark symbol inside the circle
-            checkmark_color = "white"
-            draw.line([(checkmark_offset_x - 4, checkmark_offset_y), 
-                    (checkmark_offset_x, checkmark_offset_y + 4), 
-                    (checkmark_offset_x + 6, checkmark_offset_y - 6)], fill=checkmark_color, width=2)
-
-            # Update the label's image with the modified thumbnail
-            updated_thumbnail = ImageTk.PhotoImage(canvas)
-            thumbnail_info["label"].configure(image=updated_thumbnail)
-            thumbnail_info["label"].image = updated_thumbnail  # Keep reference to prevent garbage collection
-            print(f"Checkmark and 'X' applied to {file_path}")
-
-    def draw_remove_icon(self, draw, img_width, img_height):
-        """Draw the 'X' button in the top-left corner."""
-        circle_radius = 10
-        circle_center = (15, 15)  # Position slightly within bounds for visibility
-
-        # Draw circle background for "X"
-        draw.ellipse(
-            [
-                (circle_center[0] - circle_radius, circle_center[1] - circle_radius),
-                (circle_center[0] + circle_radius, circle_center[1] + circle_radius)
-            ],
-            fill="red"
-        )
-
-        # Draw "X" within the circle
-        x_color = "white"
-        x_offset = 4  # Define "X" size within the circle
-        x_start = (circle_center[0] - x_offset, circle_center[1] - x_offset)
-        x_end = (circle_center[0] + x_offset, circle_center[1] + x_offset)
-        draw.line([x_start, x_end], fill=x_color, width=2)
-        draw.line([(x_start[0], x_end[1]), (x_end[0], x_start[1])], fill=x_color, width=2)
-
-
-    def handle_thumbnail_click(self, event, file_path, img):
-        """Handle click on the thumbnail to remove it if 'X' is clicked, or enlarge if elsewhere."""
-        # Coordinates of the "X" button bounding box
-        x_button_x, x_button_y, radius = 15, 15, 10  # Position and size of the "X" button
-        x_button_bounds = (
-            x_button_x - radius, x_button_y - radius,
-            x_button_x + radius, x_button_y + radius
-        )
-
-        # Check if click is within the bounds of the "X" button
-        if x_button_bounds[0] <= event.x <= x_button_bounds[2] and x_button_bounds[1] <= event.y <= x_button_bounds[3]:
-            self.remove_selection(file_path)  # Click on "X" button removes the thumbnail
-
-    def add_remove_icon(self, img, file_path):
-        """Create a larger canvas with a floating circular 'X' button positioned close to the image corner."""
-        # Define the expanded canvas size, slightly larger than the thumbnail
-        canvas_size = (self.thumbnail_size + 20, self.thumbnail_size + 20)
-        offset = 10  # Offset to center the image within the larger canvas
-
-        # Create a blank canvas with a transparent background
-        canvas = Image.new("RGBA", canvas_size, (255, 255, 255, 0))
-        canvas.paste(img, (offset, offset))  # Center the image on the canvas
-
-        # Draw the "X" button near the top-left corner of the image, within the expanded canvas
-        draw = ImageDraw.Draw(canvas)
-        circle_radius = 10
-        # Position circle to be partially off the top-left but fully within the expanded canvas
-        circle_center = (offset + 5, offset + 5)  # Position slightly inwards to avoid canvas edges
-
-        # Draw circle background
-        draw.ellipse(
-            [
-                (circle_center[0] - circle_radius, circle_center[1] - circle_radius),
-                (circle_center[0] + circle_radius, circle_center[1] + circle_radius)
-            ],
-            fill="red"
-        )
-
-        # Draw the "X" inside the circle
-        x_color = "white"
-        x_offset = 4  # Adjust for a smaller "X" to fit nicely inside the circle
-        x_start = (circle_center[0] - x_offset, circle_center[1] - x_offset)
-        x_end = (circle_center[0] + x_offset, circle_center[1] + x_offset)
-        draw.line([x_start, x_end], fill=x_color, width=2)
-        draw.line([(x_start[0], x_end[1]), (x_end[0], x_start[1])], fill=x_color, width=2)
-
-        # Return the updated image as a Tkinter-compatible image
-        return ImageTk.PhotoImage(canvas)
-
-    def remove_selection(self, file_path):
-        """Remove a file from the selected files list and update the display."""
-        if file_path in self.selected_files:
-            self.selected_files.remove(file_path)
-            self.update_thumbnail_preview_async()
-
-    def convert_single_image(self, file_path, output_dir, output_ext, quality):
-        """Convert a single image and save it to the output directory, then add a checkmark if successful."""
-        base_name = os.path.splitext(os.path.basename(file_path))[0]
-        output_path = os.path.join(output_dir, f"{base_name}.{output_ext}")
-
+    def save_with_exif(self, img, output_path, format_name, image_data, **kwargs):
+        """Save image with optional EXIF preservation"""
         try:
-            # Open image
-            RAW_EXTENSIONS = ['.nef', '.cr2', '.arw', '.dng']
-            if any(file_path.lower().endswith(ext) for ext in RAW_EXTENSIONS):
-                with rawpy.imread(file_path) as raw:
-                    rgb_array = raw.postprocess()
-                image = Image.fromarray(rgb_array)
+            if self.preserve_exif.get():
+                # Get original EXIF data
+                exif_data = image_data.get_exif_data()
+                if exif_data and format_name in ['JPEG', 'TIFF']:
+                    # Save with EXIF data for supported formats
+                    img.save(output_path, format=format_name, exif=exif_data, **kwargs)
+                else:
+                    # Save without EXIF if not supported by format or no EXIF data
+                    img.save(output_path, format=format_name, **kwargs)
             else:
-                image = Image.open(file_path)
+                # Save without EXIF
+                img.save(output_path, format=format_name, **kwargs)
+        except Exception as e:
+            # Fallback: save without EXIF if there's an error
+            print(f"Warning: Could not preserve EXIF for {image_data.filename}, saving without EXIF: {e}")
+            img.save(output_path, format=format_name, **kwargs)
 
-            # Save image in specified format
-            save_options = {'quality': quality} if quality else {}
-            image.save(output_path, format=output_ext.upper(), **save_options)
+class ConvertTab(BaseTab):
+    def get_default_output_dir(self):
+        return "converted"
+        
+    def setup_controls(self):
+        tk.Label(self.controls_frame, text="Convert to:").pack(side=tk.LEFT, padx=5)
+        
+        # Expanded format list with popular formats first
+        formats = [
+            # Popular formats
+            "JPEG", "PNG", "WEBP", "TIFF",
+            # Less common but supported formats
+            "BMP", "GIF", "TGA", "PPM", "PBM", "PGM",
+            "PCX", "ICNS", "ICO", "IM", "MSP", "SGI",
+            "SPIDER", "XBM", "XPM"
+        ]
+        
+        self.format_var = tk.StringVar(value="JPEG")
+        format_combo = ttk.Combobox(
+            self.controls_frame, textvariable=self.format_var,
+            values=formats, state="readonly"
+        )
+        format_combo.pack(side=tk.LEFT, padx=5)
+        
+        # Quality control for lossy formats
+        tk.Label(self.controls_frame, text="Quality:").pack(side=tk.LEFT, padx=5)
+        self.quality_var = tk.StringVar(value="95")
+        self.quality_entry = tk.Entry(self.controls_frame, textvariable=self.quality_var, width=6)
+        self.quality_entry.pack(side=tk.LEFT, padx=5)
+        
+        tk.Label(self.controls_frame, text="(for JPEG/WEBP)", font=("Arial", 8), fg="gray").pack(side=tk.LEFT, padx=2)
+        
+    def process_single_image(self, image_data, output_dir):
+        try:
+            if image_data.file_path.lower().endswith(('.cr2', '.nef', '.arw', '.dng', '.raf')):
+                with rawpy.imread(image_data.file_path) as raw:
+                    rgb = raw.postprocess()
+                    img = Image.fromarray(rgb)
+            else:
+                img = Image.open(image_data.file_path)
+                
+            format_name = self.format_var.get()
             
-            print(f"Converted {file_path} to {output_path}")
+            # Convert mode if necessary
+            if format_name == 'JPEG' and img.mode in ('RGBA', 'LA', 'P'):
+                # Convert to RGB for JPEG
+                if img.mode == 'P':
+                    img = img.convert('RGBA')
+                # Create white background for transparency
+                background = Image.new('RGB', img.size, (255, 255, 255))
+                if img.mode in ('RGBA', 'LA'):
+                    background.paste(img, mask=img.split()[-1])
+                img = background
+            elif format_name == 'BMP' and img.mode in ('RGBA', 'LA'):
+                # BMP doesn't support transparency
+                background = Image.new('RGB', img.size, (255, 255, 255))
+                background.paste(img, mask=img.split()[-1])
+                img = background
+                
+            # Generate output filename
+            base_name = Path(image_data.filename).stem
             
-            # Apply checkmark overlay to the thumbnail
-            self.overlay_check_mark(file_path)
-            return True
+            # File extensions mapping
+            ext_map = {
+                'JPEG': '.jpg', 'PNG': '.png', 'WEBP': '.webp', 'TIFF': '.tiff',
+                'BMP': '.bmp', 'GIF': '.gif', 'TGA': '.tga', 'PPM': '.ppm',
+                'PBM': '.pbm', 'PGM': '.pgm', 'PCX': '.pcx', 'ICNS': '.icns',
+                'ICO': '.ico', 'IM': '.im', 'MSP': '.msp', 'SGI': '.sgi',
+                'SPIDER': '.spi', 'XBM': '.xbm', 'XPM': '.xpm'
+            }
+            
+            ext = ext_map.get(format_name, f'.{format_name.lower()}')
+            output_path = os.path.join(output_dir, f"{base_name}{ext}")
+            
+            # Save with appropriate parameters
+            save_kwargs = {}
+            if format_name in ['JPEG', 'WEBP']:
+                quality = int(self.quality_var.get()) if self.quality_var.get() else 95
+                save_kwargs['quality'] = quality
+                save_kwargs['optimize'] = True
+            
+            self.save_with_exif(img, output_path, format_name, image_data, **save_kwargs)
+            print(f"Converted: {image_data.filename} -> {os.path.basename(output_path)}")
+            
+        except Exception as e:
+            print(f"Error in convert process_single_image for {image_data.filename}: {e}")
+            raise
+
+class ResizeTab(BaseTab):
+    def get_default_output_dir(self):
+        return "resized"
+        
+    def setup_controls(self):
+        # Resize method
+        tk.Label(self.controls_frame, text="Method:").pack(side=tk.LEFT, padx=5)
+        
+        self.method_var = tk.StringVar(value="Pixels")
+        method_combo = ttk.Combobox(
+            self.controls_frame, textvariable=self.method_var,
+            values=["Pixels", "Percentage", "File Size Limit"],
+            state="readonly"
+        )
+        method_combo.pack(side=tk.LEFT, padx=5)
+        method_combo.bind('<<ComboboxSelected>>', self.on_method_change)
+        
+        # Dynamic input fields frame
+        self.input_frame = tk.Frame(self.controls_frame)
+        self.input_frame.pack(side=tk.LEFT, padx=10)
+        
+        # Initialize with pixels method
+        self.setup_pixels_inputs()
+        
+    def on_method_change(self, event=None):
+        # Clear existing inputs
+        for widget in self.input_frame.winfo_children():
+            widget.destroy()
+            
+        method = self.method_var.get()
+        if method == "Pixels":
+            self.setup_pixels_inputs()
+        elif method == "Percentage":
+            self.setup_percentage_inputs()
+        elif method == "File Size Limit":
+            self.setup_filesize_inputs()
+            
+    def setup_pixels_inputs(self):
+        # Width
+        tk.Label(self.input_frame, text="Width:").pack(side=tk.LEFT, padx=5)
+        self.width_var = tk.StringVar(value="800")
+        tk.Entry(self.input_frame, textvariable=self.width_var, width=8).pack(side=tk.LEFT, padx=5)
+        
+        # Height
+        tk.Label(self.input_frame, text="Height:").pack(side=tk.LEFT, padx=5)
+        self.height_var = tk.StringVar(value="600")
+        tk.Entry(self.input_frame, textvariable=self.height_var, width=8).pack(side=tk.LEFT, padx=5)
+        
+        # Maintain aspect ratio
+        self.maintain_aspect = tk.BooleanVar(value=True)
+        tk.Checkbutton(
+            self.input_frame, text="Maintain aspect ratio",
+            variable=self.maintain_aspect
+        ).pack(side=tk.LEFT, padx=5)
+        
+    def setup_percentage_inputs(self):
+        tk.Label(self.input_frame, text="Scale %:").pack(side=tk.LEFT, padx=5)
+        self.scale_var = tk.StringVar(value="50")
+        tk.Entry(self.input_frame, textvariable=self.scale_var, width=8).pack(side=tk.LEFT, padx=5)
+        
+    def setup_filesize_inputs(self):
+        tk.Label(self.input_frame, text="Max Size (KB):").pack(side=tk.LEFT, padx=5)
+        self.filesize_var = tk.StringVar(value="500")
+        tk.Entry(self.input_frame, textvariable=self.filesize_var, width=8).pack(side=tk.LEFT, padx=5)
+        
+        tk.Label(self.input_frame, text="Quality:").pack(side=tk.LEFT, padx=5)
+        self.quality_var = tk.StringVar(value="85")
+        tk.Entry(self.input_frame, textvariable=self.quality_var, width=6).pack(side=tk.LEFT, padx=5)
+        
+    def process_single_image(self, image_data, output_dir):
+        try:
+            if image_data.file_path.lower().endswith(('.cr2', '.nef', '.arw', '.dng', '.raf')):
+                with rawpy.imread(image_data.file_path) as raw:
+                    rgb = raw.postprocess()
+                    img = Image.fromarray(rgb)
+            else:
+                img = Image.open(image_data.file_path)
+                
+            method = self.method_var.get()
+            
+            if method == "Pixels":
+                width = int(self.width_var.get()) if self.width_var.get() else img.width
+                height = int(self.height_var.get()) if self.height_var.get() else img.height
+                
+                if self.maintain_aspect.get():
+                    img.thumbnail((width, height), Image.Resampling.LANCZOS)
+                else:
+                    img = img.resize((width, height), Image.Resampling.LANCZOS)
+                    
+            elif method == "Percentage":
+                scale = float(self.scale_var.get()) / 100 if self.scale_var.get() else 1.0
+                new_width = int(img.width * scale)
+                new_height = int(img.height * scale)
+                img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                
+            elif method == "File Size Limit":
+                # Try different qualities until file size is acceptable
+                target_size_kb = int(self.filesize_var.get()) if self.filesize_var.get() else 500
+                quality = int(self.quality_var.get()) if self.quality_var.get() else 85
+                
+                # Convert to RGB if necessary for JPEG compression
+                if img.mode != 'RGB':
+                    img = img.convert('RGB')
+                
+                # Binary search for optimal quality
+                import io
+                min_quality, max_quality = 10, quality
+                best_quality = quality
+                
+                for _ in range(10):  # Max 10 iterations
+                    test_quality = (min_quality + max_quality) // 2
+                    buffer = io.BytesIO()
+                    
+                    # Use EXIF if preserving and available
+                    save_kwargs = {'format': 'JPEG', 'quality': test_quality, 'optimize': True}
+                    if self.preserve_exif.get():
+                        exif_data = image_data.get_exif_data()
+                        if exif_data:
+                            save_kwargs['exif'] = exif_data
+                    
+                    img.save(buffer, **save_kwargs)
+                    size_kb = len(buffer.getvalue()) / 1024
+                    
+                    if size_kb <= target_size_kb:
+                        best_quality = test_quality
+                        min_quality = test_quality + 1
+                    else:
+                        max_quality = test_quality - 1
+                        
+                    if min_quality > max_quality:
+                        break
+                
+                # Use the best quality found
+                quality = best_quality
+                
+            # Generate output filename
+            base_name = Path(image_data.filename).stem
+            original_ext = Path(image_data.filename).suffix
+            ext = original_ext if method != "File Size Limit" else '.jpg'
+            output_path = os.path.join(output_dir, f"{base_name}_resized{ext}")
+            
+            # Save
+            if method == "File Size Limit":
+                self.save_with_exif(img, output_path, 'JPEG', image_data, quality=quality, optimize=True)
+            else:
+                # Determine format from extension
+                format_name = 'JPEG' if ext.lower() in ['.jpg', '.jpeg'] else img.format or 'PNG'
+                self.save_with_exif(img, output_path, format_name, image_data)
+                
+            print(f"Resized: {image_data.filename} -> {os.path.basename(output_path)}")
+            
+        except Exception as e:
+            print(f"Error in resize process_single_image for {image_data.filename}: {e}")
+            raise
+
+class CompressTab(BaseTab):
+    def get_default_output_dir(self):
+        return "compressed"
+        
+    def setup_controls(self):
+        # Output format - expanded list
+        tk.Label(self.controls_frame, text="Format:").pack(side=tk.LEFT, padx=5)
+        
+        # Popular compression formats first
+        formats = [
+            "WEBP", "JPEG", "PNG", "TIFF",
+            # Additional formats that support compression
+            "BMP", "TGA", "PPM", "PGM", "PCX"
+        ]
+        
+        self.format_var = tk.StringVar(value="WEBP")
+        format_combo = ttk.Combobox(
+            self.controls_frame, textvariable=self.format_var,
+            values=formats, state="readonly"
+        )
+        format_combo.pack(side=tk.LEFT, padx=5)
+        
+        # Quality
+        tk.Label(self.controls_frame, text="Quality:").pack(side=tk.LEFT, padx=5)
+        self.quality_var = tk.StringVar(value="80")
+        tk.Entry(self.controls_frame, textvariable=self.quality_var, width=8).pack(side=tk.LEFT, padx=5)
+        
+        # Max width/height for web
+        tk.Label(self.controls_frame, text="Max Size (px):").pack(side=tk.LEFT, padx=5)
+        self.max_size_var = tk.StringVar(value="1920")
+        tk.Entry(self.controls_frame, textvariable=self.max_size_var, width=8).pack(side=tk.LEFT, padx=5)
+        
+        tk.Label(self.controls_frame, text="(maintains aspect ratio)", font=("Arial", 8), fg="gray").pack(side=tk.LEFT, padx=5)
+        
+    def process_single_image(self, image_data, output_dir):
+        try:
+            if image_data.file_path.lower().endswith(('.cr2', '.nef', '.arw', '.dng', '.raf')):
+                with rawpy.imread(image_data.file_path) as raw:
+                    rgb = raw.postprocess()
+                    img = Image.fromarray(rgb)
+            else:
+                img = Image.open(image_data.file_path)
+                
+            # Resize if larger than max size (maintaining aspect ratio)
+            max_size = int(self.max_size_var.get()) if self.max_size_var.get() else 1920
+            
+            # Find the larger dimension and scale based on that
+            if img.width > max_size or img.height > max_size:
+                if img.width > img.height:
+                    # Width is larger, scale based on width
+                    ratio = max_size / img.width
+                    new_width = max_size
+                    new_height = int(img.height * ratio)
+                else:
+                    # Height is larger, scale based on height
+                    ratio = max_size / img.height
+                    new_height = max_size
+                    new_width = int(img.width * ratio)
+                
+                img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            
+            format_name = self.format_var.get()
+            
+            # Convert mode if necessary
+            if format_name == 'JPEG' and img.mode in ('RGBA', 'LA', 'P'):
+                # Convert to RGB for JPEG
+                if img.mode == 'P':
+                    img = img.convert('RGBA')
+                # Create white background for transparency
+                background = Image.new('RGB', img.size, (255, 255, 255))
+                if img.mode in ('RGBA', 'LA'):
+                    background.paste(img, mask=img.split()[-1])
+                img = background
+                
+            # Generate output filename
+            base_name = Path(image_data.filename).stem
+            
+            # File extensions mapping
+            ext_map = {
+                'WEBP': '.webp', 'JPEG': '.jpg', 'PNG': '.png', 'TIFF': '.tiff',
+                'BMP': '.bmp', 'TGA': '.tga', 'PPM': '.ppm', 'PGM': '.pgm',
+                'PCX': '.pcx'
+            }
+            
+            ext = ext_map.get(format_name, f'.{format_name.lower()}')
+            output_path = os.path.join(output_dir, f"{base_name}_compressed{ext}")
+            
+            # Save with compression
+            quality = int(self.quality_var.get()) if self.quality_var.get() else 80
+            save_kwargs = {}
+            
+            if format_name in ['JPEG', 'WEBP']:
+                save_kwargs['quality'] = quality
+                save_kwargs['optimize'] = True
+            elif format_name == 'PNG':
+                save_kwargs['optimize'] = True
+                # PNG compression level (0-9, where 9 is maximum compression)
+                save_kwargs['compress_level'] = min(9, max(0, int((100 - quality) / 10)))
+            elif format_name == 'TIFF':
+                save_kwargs['compression'] = 'tiff_lzw'  # Use LZW compression for TIFF
+            
+            self.save_with_exif(img, output_path, format_name, image_data, **save_kwargs)
+            print(f"Compressed: {image_data.filename} -> {os.path.basename(output_path)}")
+            
+        except Exception as e:
+            print(f"Error in compress process_single_image for {image_data.filename}: {e}")
+            raise
+
+class UpscaleTab(BaseTab):
+    def get_default_output_dir(self):
+        return "upscaled"
+
+    def setup_controls(self):
+        # Upscale method
+        tk.Label(self.controls_frame, text="Method:").pack(side=tk.LEFT, padx=5)
+        self.method_var = tk.StringVar(value="Real-ESRGAN")
+        ttk.Combobox(
+            self.controls_frame, textvariable=self.method_var,
+            values=["Real-ESRGAN", "LANCZOS"], state="readonly"
+        ).pack(side=tk.LEFT, padx=5)
+
+        # Scale selector
+        tk.Label(self.controls_frame, text="Scale:").pack(side=tk.LEFT, padx=5)
+        self.scale_var = tk.StringVar(value="2")
+        ttk.Combobox(
+            self.controls_frame, textvariable=self.scale_var,
+            values=["2", "4"], state="readonly"
+        ).pack(side=tk.LEFT, padx=5)
+
+        # Denoise option
+        self.denoise_after = tk.BooleanVar(value=True)
+        tk.Checkbutton(
+            self.controls_frame,
+            text="Denoise after upscaling",
+            variable=self.denoise_after
+        ).pack(side=tk.LEFT, padx=10)
+
+    def process_single_image(self, image_data, output_dir):
+        try:
+            # Load image
+            if image_data.file_path.lower().endswith(('.cr2', '.nef', '.arw', '.dng', '.raf')):
+                with rawpy.imread(image_data.file_path) as raw:
+                    rgb = raw.postprocess()
+                    img = Image.fromarray(rgb)
+            else:
+                img = Image.open(image_data.file_path)
+
+            method = self.method_var.get()
+            scale = int(self.scale_var.get())
+
+            # Apply upscaling
+            if method == "Real-ESRGAN":
+                try:
+                    from realesrgan import RealESRGAN
+                    import torch
+
+                    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                    model = RealESRGAN(device, scale=scale)
+                    model.load_weights(f'RealESRGAN_x{scale}plus.pth', download=True)
+
+                    img = model.predict(img)
+                except ImportError:
+                    print("Real-ESRGAN not installed. Falling back to LANCZOS.")
+                    method = "LANCZOS"
+                except Exception as e:
+                    print(f"Real-ESRGAN error: {e}. Falling back to LANCZOS.")
+                    method = "LANCZOS"
+
+            if method == "LANCZOS":
+                new_size = (img.width * scale, img.height * scale)
+                img = img.resize(new_size, Image.Resampling.LANCZOS)
+
+            # Denoise after upscaling if enabled
+            if self.denoise_after.get():
+                try:
+                    import cv2
+                    import numpy as np
+                    img_np = np.array(img)
+                    # Apply bilateral filter
+                    img_np = cv2.bilateralFilter(img_np, d=9, sigmaColor=75, sigmaSpace=75)
+                    img = Image.fromarray(img_np)
+                    print("Applied OpenCV denoising")
+                except ImportError:
+                    print("OpenCV not installed. Skipping denoising.")
+                except Exception as e:
+                    print(f"Denoising error: {e}")
+
+            # Save output
+            base_name = Path(image_data.filename).stem
+            ext = Path(image_data.filename).suffix
+            output_path = os.path.join(output_dir, f"{base_name}_upscaled{ext}")
+            format_name = img.format or 'PNG'
+            self.save_with_exif(img, output_path, format_name, image_data)
+
+            print(f"Upscaled: {image_data.filename} -> {os.path.basename(output_path)}")
 
         except Exception as e:
-            print(f"Failed to convert {file_path}: {e}")
-            return False
+            print(f"Error in upscale for {image_data.filename}: {e}")
+            raise
 
-    def convert_images(self):
-        if not self.selected_files:
-            messagebox.showwarning("Warning", "Please select images to convert.")
-            return
+class ImageProcessorApp:
+    def __init__(self):
+        self.root = TkinterDnD.Tk()
+        self.root.title("Image Processor")
+        self.root.geometry("1200x700")
+        self.setup_ui()
         
-        failed_files = []
-
-        # Prepare output directory
-        output_dir = self.output_directory.get()
-        if not output_dir:
-            output_dir = os.path.join(os.path.dirname(self.selected_files[0]), "(directory-converted)")
-        os.makedirs(output_dir, exist_ok=True)
-
-        # Output format and settings
-        format_key = self.output_format.get()
-        output_ext = FORMAT_OPTIONS[format_key]['ext']
-        quality = self.quality.get() if FORMAT_OPTIONS[format_key]['supports_quality'] else None
-
-        # Set up the thread pool
-        max_workers = max(1, os.cpu_count() - 1)
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(self.convert_single_image, file_path, output_dir, output_ext, quality): file_path
-                for file_path in self.selected_files
-            }
-
-            for future in as_completed(futures):
-                file_path = futures[future]
-                try:
-                    success = future.result()
-                    if not success:
-                        failed_files.append((file_path, "Unknown error"))
-                        print(f"Failed to convert: {file_path}")
-                    else:
-                        print(f"Successfully converted: {file_path}")
-                except Exception as e:
-                    failed_files.append((file_path, str(e)))
-                    print(f"Exception for {file_path}: {e}")
-
-        if failed_files:
-            error_message = "\n\n".join(
-                f"{os.path.basename(path)}:\n{err}" for path, err in failed_files[:5]
-            )
-            if len(failed_files) > 5:
-                error_message += f"\n\n...and {len(failed_files) - 5} more failures."
-            messagebox.showerror("Conversion Errors", f"Some files failed to convert:\n\n{error_message}")
-        else:
-            messagebox.showinfo("Success", f"All images converted successfully to:\n{output_dir}")
-
-    def convert_images_threaded(self):
-        conversion_thread = threading.Thread(target=self.convert_images)
-        conversion_thread.start()
-
-def generate_thumbnail(file_path, size=(128, 128)):
-    """Generate a high-quality thumbnail from a raw image file."""
-    try:
-        with rawpy.imread(file_path) as raw:
-            # Post-process the raw image into RGB
-            rgb_array = raw.postprocess()
-            # Resize the result to create a thumbnail
-            thumbnail_img = Image.fromarray(rgb_array).resize(size, Image.Resampling.LANCZOS)
-            return thumbnail_img
-    except Exception as e:
-        print(f"Failed to generate thumbnail for {file_path}: {e}")
-        return None
-
+    def setup_ui(self):
+        # Create notebook for tabs
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Create tabs
+        self.convert_tab = ConvertTab(self.notebook)
+        self.resize_tab = ResizeTab(self.notebook)
+        self.compress_tab = CompressTab(self.notebook)
+        self.upscale_tab = UpscaleTab(self.notebook)
+        
+        # Add tabs to notebook
+        self.notebook.add(self.convert_tab, text="Convert")
+        self.notebook.add(self.resize_tab, text="Resize")
+        self.notebook.add(self.compress_tab, text="Compress")
+        self.notebook.add(self.upscale_tab, text="Upscale")
+        
+        # Menu bar
+        self.setup_menu()
+        
+    def setup_menu(self):
+        menubar = tk.Menu(self.root)
+        self.root.config(menu=menubar)
+        
+        file_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="File", menu=file_menu)
+        file_menu.add_command(label="Add Images", command=self.add_images)
+        file_menu.add_separator()
+        file_menu.add_command(label="Exit", command=self.root.quit)
+        
+    def add_images(self):
+        files = filedialog.askopenfilenames(
+            title="Select Images",
+            filetypes=[
+                ("All Images", "*.jpg *.jpeg *.png *.bmp *.tiff *.tif *.webp *.heic *.heif *.cr2 *.nef *.arw *.dng *.raf *.gif"),
+                ("JPEG files", "*.jpg *.jpeg"),
+                ("PNG files", "*.png"),
+                ("RAW files", "*.cr2 *.nef *.arw *.dng *.raf"),
+                ("All files", "*.*")
+            ]
+        )
+        
+        current_tab = self.notebook.select()
+        tab_widget = self.notebook.nametowidget(current_tab)
+        
+        for file_path in files:
+            if tab_widget.is_valid_image(file_path):
+                tab_widget.add_image(file_path)
+                
+    def run(self):
+        self.root.mainloop()
 
 if __name__ == "__main__":
-    root = TkinterDnD.Tk()  # Use TkinterDnD for drag-and-drop
-    app = ImageConverterApp(root)
-    root.mainloop()
+    app = ImageProcessorApp()
+    app.run()
