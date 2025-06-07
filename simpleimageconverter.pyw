@@ -13,7 +13,7 @@ def check_and_install(package):
         subprocess.check_call([sys.executable, '-m', 'pip', 'install', package])
 
 def install_dependencies():
-    packages = ['Pillow', 'pillow-heif', 'tkinterdnd2', 'rawpy']
+    packages = ['Pillow', 'pillow-heif', 'tkinterdnd2', 'rawpy', 'realesrgan']
     
     # Use ThreadPoolExecutor to install packages in parallel
     with ThreadPoolExecutor() as executor:
@@ -28,7 +28,6 @@ import os
 from PIL import Image, ImageTk
 from PIL.ExifTags import TAGS
 import threading
-import queue
 from pathlib import Path
 import rawpy
 import pillow_heif
@@ -667,7 +666,7 @@ class ResizeTab(BaseTab):
 
 class CompressTab(BaseTab):
     def get_default_output_dir(self):
-        return "compressed"
+        return "web-optimized"
         
     def setup_controls(self):
         # Output format - expanded list
@@ -750,7 +749,7 @@ class CompressTab(BaseTab):
             }
             
             ext = ext_map.get(format_name, f'.{format_name.lower()}')
-            output_path = os.path.join(output_dir, f"{base_name}_compressed{ext}")
+            output_path = os.path.join(output_dir, f"{base_name}{ext}")
             
             # Save with compression
             quality = int(self.quality_var.get()) if self.quality_var.get() else 80
@@ -859,7 +858,7 @@ class UpscaleTab(BaseTab):
 class ImageProcessorApp:
     def __init__(self):
         self.root = TkinterDnD.Tk()
-        self.root.title("Image Processor")
+        self.root.title("Simple Image Converter")
         self.root.geometry("1200x700")
         self.setup_ui()
         
