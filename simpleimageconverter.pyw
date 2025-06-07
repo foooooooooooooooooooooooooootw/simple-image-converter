@@ -1,5 +1,5 @@
-#V2.1 UI Overhaul 1/6/2025
-#Increased startup speed by threading dependency check
+#V2.2 Image Orientation fix 7/6/2025
+#Program no longer forces landscape orientation and you can manually rotate images before operations
 
 import subprocess
 import sys
@@ -43,17 +43,17 @@ class ImageThumbnail:
         self.processed = False
         self.thumbnail = None
         self.thumbnail_widget = None
+        self.manual_rotation = 0
         
     def create_thumbnail(self, size=(150, 120)):
         try:
-            if self.file_path.lower().endswith(('.cr2', '.nef', '.arw', '.dng', '.raf')):
-                # Handle RAW files
-                with rawpy.imread(self.file_path) as raw:
-                    rgb = raw.postprocess()
-                    img = Image.fromarray(rgb)
-            else:
-                # Handle regular image files
-                img = Image.open(self.file_path)
+            img = self.load_and_orient_image()
+            if img is None:
+                return None
+                
+            # Apply manual rotation if any
+            if hasattr(self, 'manual_rotation') and self.manual_rotation != 0:
+                img = img.rotate(-self.manual_rotation, expand=True)  # Negative because PIL rotates counter-clockwise
             
             img.thumbnail(size, Image.Resampling.LANCZOS)
             self.thumbnail = ImageTk.PhotoImage(img)
@@ -74,6 +74,47 @@ class ImageThumbnail:
         except Exception as e:
             print(f"Error extracting EXIF from {self.filename}: {e}")
             return None
+    
+    def load_and_orient_image(self):
+        """Load image and apply proper orientation from EXIF data"""
+        try:
+            if self.file_path.lower().endswith(('.cr2', '.nef', '.arw', '.dng', '.raf')):
+                # Handle RAW files
+                with rawpy.imread(self.file_path) as raw:
+                    rgb = raw.postprocess()
+                    img = Image.fromarray(rgb)
+            else:
+                # Handle regular image files
+                img = Image.open(self.file_path)
+                
+                # Apply EXIF orientation if available
+                try:
+                    exif_data = img.getexif()
+                    if exif_data is not None:
+                        orientation = exif_data.get(274)  # 274 is the EXIF orientation tag
+                        if orientation:
+                            if orientation == 3:
+                                img = img.rotate(180, expand=True)
+                            elif orientation == 6:
+                                img = img.rotate(270, expand=True)
+                            elif orientation == 8:
+                                img = img.rotate(90, expand=True)
+                except Exception as e:
+                    print(f"Could not apply EXIF orientation for {self.filename}: {e}")
+            
+            return img
+        except Exception as e:
+            print(f"Error loading image {self.filename}: {e}")
+            return None
+        
+    def rotate_image_manual(self, degrees):
+        """Manually rotate the image by specified degrees"""
+        self.manual_rotation = getattr(self, 'manual_rotation', 0) + degrees
+        self.manual_rotation = self.manual_rotation % 360
+        
+        # Refresh thumbnail
+        if hasattr(self, 'thumbnail_widget') and self.thumbnail_widget:
+            self.thumbnail_widget.refresh_thumbnail()
 
 class ImageFrame(tk.Frame):
     def __init__(self, parent, on_remove_callback):
@@ -110,6 +151,8 @@ class ImageFrame(tk.Frame):
             self.image_label.config(image=thumbnail, width=160, height=120)
             self.image_label.image = thumbnail  # Keep a reference
         self.filename_label.config(text=image_data.filename)
+
+        self.setup_rotation_buttons()
         
     def remove_image(self):
         if self.on_remove_callback and self.image_data:
@@ -119,6 +162,42 @@ class ImageFrame(tk.Frame):
         self.status_label.config(text="✓", fg="green")
         if self.image_data:
             self.image_data.processed = True
+
+    def setup_rotation_buttons(self):
+        """Add rotation buttons to the image frame"""
+        # Rotate left button
+        self.rotate_left_btn = tk.Button(
+            self.image_label, text="↶", font=("Arial", 12, "bold"),
+            fg="white", bg="blue", width=2, height=1,
+            command=self.rotate_left, bd=0
+        )
+        self.rotate_left_btn.place(x=25, y=5)
+        
+        # Rotate right button
+        self.rotate_right_btn = tk.Button(
+            self.image_label, text="↷", font=("Arial", 12, "bold"),
+            fg="white", bg="blue", width=2, height=1,
+            command=self.rotate_right, bd=0
+        )
+        self.rotate_right_btn.place(x=50, y=5)
+    
+    def rotate_left(self):
+        """Rotate image 90 degrees counter-clockwise"""
+        if self.image_data:
+            self.image_data.rotate_image_manual(-90)
+    
+    def rotate_right(self):
+        """Rotate image 90 degrees clockwise"""
+        if self.image_data:
+            self.image_data.rotate_image_manual(90)
+    
+    def refresh_thumbnail(self):
+        """Refresh the thumbnail display"""
+        if self.image_data:
+            thumbnail = self.image_data.create_thumbnail()
+            if thumbnail:
+                self.image_label.config(image=thumbnail)
+                self.image_label.image = thumbnail  # Keep a reference
 
 class BaseTab(tk.Frame):
     def __init__(self, parent):
@@ -384,13 +463,13 @@ class ConvertTab(BaseTab):
         tk.Label(self.controls_frame, text="(for JPEG/WEBP)", font=("Arial", 8), fg="gray").pack(side=tk.LEFT, padx=2)
         
     def process_single_image(self, image_data, output_dir):
-        try:
-            if image_data.file_path.lower().endswith(('.cr2', '.nef', '.arw', '.dng', '.raf')):
-                with rawpy.imread(image_data.file_path) as raw:
-                    rgb = raw.postprocess()
-                    img = Image.fromarray(rgb)
-            else:
-                img = Image.open(image_data.file_path)
+            img = image_data.load_and_orient_image()
+            if img is None:
+                raise Exception("Could not load image")
+                
+            # Apply manual rotation if any
+            if hasattr(image_data, 'manual_rotation') and image_data.manual_rotation != 0:
+                img = img.rotate(-image_data.manual_rotation, expand=True)
                 
             format_name = self.format_var.get()
             
@@ -434,10 +513,6 @@ class ConvertTab(BaseTab):
             
             self.save_with_exif(img, output_path, format_name, image_data, **save_kwargs)
             print(f"Converted: {image_data.filename} -> {os.path.basename(output_path)}")
-            
-        except Exception as e:
-            print(f"Error in convert process_single_image for {image_data.filename}: {e}")
-            raise
 
 class ResizeTab(BaseTab):
     def get_default_output_dir(self):
@@ -509,13 +584,13 @@ class ResizeTab(BaseTab):
         tk.Entry(self.input_frame, textvariable=self.quality_var, width=6).pack(side=tk.LEFT, padx=5)
         
     def process_single_image(self, image_data, output_dir):
-        try:
-            if image_data.file_path.lower().endswith(('.cr2', '.nef', '.arw', '.dng', '.raf')):
-                with rawpy.imread(image_data.file_path) as raw:
-                    rgb = raw.postprocess()
-                    img = Image.fromarray(rgb)
-            else:
-                img = Image.open(image_data.file_path)
+            img = image_data.load_and_orient_image()
+            if img is None:
+                raise Exception("Could not load image")
+                
+            # Apply manual rotation if any
+            if hasattr(image_data, 'manual_rotation') and image_data.manual_rotation != 0:
+                img = img.rotate(-image_data.manual_rotation, expand=True)
                 
             method = self.method_var.get()
             
@@ -589,10 +664,6 @@ class ResizeTab(BaseTab):
                 self.save_with_exif(img, output_path, format_name, image_data)
                 
             print(f"Resized: {image_data.filename} -> {os.path.basename(output_path)}")
-            
-        except Exception as e:
-            print(f"Error in resize process_single_image for {image_data.filename}: {e}")
-            raise
 
 class CompressTab(BaseTab):
     def get_default_output_dir(self):
@@ -629,13 +700,13 @@ class CompressTab(BaseTab):
         tk.Label(self.controls_frame, text="(maintains aspect ratio)", font=("Arial", 8), fg="gray").pack(side=tk.LEFT, padx=5)
         
     def process_single_image(self, image_data, output_dir):
-        try:
-            if image_data.file_path.lower().endswith(('.cr2', '.nef', '.arw', '.dng', '.raf')):
-                with rawpy.imread(image_data.file_path) as raw:
-                    rgb = raw.postprocess()
-                    img = Image.fromarray(rgb)
-            else:
-                img = Image.open(image_data.file_path)
+            img = image_data.load_and_orient_image()
+            if img is None:
+                raise Exception("Could not load image")
+                
+            # Apply manual rotation if any
+            if hasattr(image_data, 'manual_rotation') and image_data.manual_rotation != 0:
+                img = img.rotate(-image_data.manual_rotation, expand=True)
                 
             # Resize if larger than max size (maintaining aspect ratio)
             max_size = int(self.max_size_var.get()) if self.max_size_var.get() else 1920
@@ -697,10 +768,6 @@ class CompressTab(BaseTab):
             
             self.save_with_exif(img, output_path, format_name, image_data, **save_kwargs)
             print(f"Compressed: {image_data.filename} -> {os.path.basename(output_path)}")
-            
-        except Exception as e:
-            print(f"Error in compress process_single_image for {image_data.filename}: {e}")
-            raise
 
 class UpscaleTab(BaseTab):
     def get_default_output_dir(self):
@@ -732,14 +799,13 @@ class UpscaleTab(BaseTab):
         ).pack(side=tk.LEFT, padx=10)
 
     def process_single_image(self, image_data, output_dir):
-        try:
-            # Load image
-            if image_data.file_path.lower().endswith(('.cr2', '.nef', '.arw', '.dng', '.raf')):
-                with rawpy.imread(image_data.file_path) as raw:
-                    rgb = raw.postprocess()
-                    img = Image.fromarray(rgb)
-            else:
-                img = Image.open(image_data.file_path)
+            img = image_data.load_and_orient_image()
+            if img is None:
+                raise Exception("Could not load image")
+                
+            # Apply manual rotation if any
+            if hasattr(image_data, 'manual_rotation') and image_data.manual_rotation != 0:
+                img = img.rotate(-image_data.manual_rotation, expand=True)
 
             method = self.method_var.get()
             scale = int(self.scale_var.get())
@@ -789,10 +855,6 @@ class UpscaleTab(BaseTab):
             self.save_with_exif(img, output_path, format_name, image_data)
 
             print(f"Upscaled: {image_data.filename} -> {os.path.basename(output_path)}")
-
-        except Exception as e:
-            print(f"Error in upscale for {image_data.filename}: {e}")
-            raise
 
 class ImageProcessorApp:
     def __init__(self):
